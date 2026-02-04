@@ -1,0 +1,28 @@
+<RCC>
+    <qresource prefix="/ikonice">
+        <file>1.png</file>
+        <file>2.png</file>
+        <file>3.png</file>
+        <file>4.png</file>
+        <file>5.png</file>
+        <file>6.png</file>
+        <file>7.png</file>
+        <file>logo.png</file>
+        <file>mis.png</file>
+        <file>najdeblji.png</file>
+        <file>najtanji.png</file>
+        <file>srednji.png</file>
+        <file>8.png</file>
+        <file>logo-mini.png</file>
+        <file>logo-mini.ico</file>
+    </qresource>
+    <qresource prefix="/biblioteke">
+        <file>libopencv_core490.dll</file>
+        <file>libopencv_highgui490.dll</file>
+        <file>libopencv_imgcodecs490.dll</file>
+        <file>libopencv_imgproc490.dll</file>
+        <file>libopencv_features2d490.dll</file>
+        <file>libopencv_video490.dll</file>
+        <file>libopencv_videoio490.dll</file>
+    </qresource>
+</RCC>

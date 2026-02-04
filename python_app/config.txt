@@ -1,0 +1,17 @@
+# DefectDetect Python config
+MarkerThickness=20
+x=200
+y=200
+sx=50
+sy=50
+Marker1Name=Defect 1
+Marker2Name=Defect 2
+Marker3Name=Defect 3
+Marker4Name=Defect 4
+Marker5Name=Defect 5
+EraserName=Eraser
+EdgeName=Edge
+SurfaceName=Surface
+ClassCorrectName=Class Correct
+ClassLeatherName=Leather
+Rating1Tolerance=95

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import List, Optional
 
@@ -17,6 +18,13 @@ from exporters import (
     export_yolo,
     save_patches,
 )
+
+
+class DrawMode(Enum):
+    """Modes for drawing annotations"""
+    FREE_HAND = "free_hand"
+    RECTANGLE = "rectangle"
+    ELLIPSE = "ellipse"
 
 
 APP_ROOT = Path(__file__).resolve().parent
@@ -38,7 +46,7 @@ class ImageState:
         return 0 if self.original is None else int(self.original.shape[0])
 
 
-class ImageCanvas(QtWidgets.QLabel):
+class ZoomableImageCanvas(QtWidgets.QLabel):
     def __init__(self) -> None:
         super().__init__()
         self.setAlignment(QtCore.Qt.AlignCenter)
@@ -48,10 +56,21 @@ class ImageCanvas(QtWidgets.QLabel):
         self._brush_size = 20
         self._draw_mode = True
         self._last_point: Optional[QtCore.QPoint] = None
+        self._zoom_level = 1.0
+        self._min_zoom = 0.1
+        self._max_zoom = 5.0
+        self._drawing_mode = DrawMode.FREE_HAND
+        self._shape_start_point: Optional[tuple[int, int]] = None
+        self._is_drawing_shape = False
+        self._temp_image: Optional[np.ndarray] = None
 
     def set_state(self, state: ImageState) -> None:
         self._state = state
         self._last_point = None
+        self._zoom_level = 1.0
+        self._shape_start_point = None
+        self._is_drawing_shape = False
+        self._temp_image = None
         self._refresh()
 
     def set_brush(self, color: tuple[int, int, int], size: int, draw_mode: bool) -> None:
@@ -59,16 +78,51 @@ class ImageCanvas(QtWidgets.QLabel):
         self._brush_size = size
         self._draw_mode = draw_mode
 
+    def set_drawing_mode(self, mode: DrawMode) -> None:
+        """Set the drawing mode (free-hand, rectangle, ellipse)"""
+        self._drawing_mode = mode
+        self._shape_start_point = None
+        self._is_drawing_shape = False
+        self._temp_image = None
+
+    def zoom_in(self) -> None:
+        self._zoom_level = min(self._zoom_level * 1.2, self._max_zoom)
+        self._refresh()
+
+    def zoom_out(self) -> None:
+        self._zoom_level = max(self._zoom_level / 1.2, self._min_zoom)
+        self._refresh()
+
+    def reset_zoom(self) -> None:
+        self._zoom_level = 1.0
+        self._refresh()
+
+    def wheelEvent(self, event: QtGui.QWheelEvent) -> None:
+        if event.modifiers() & QtCore.Qt.ControlModifier:
+            if event.angleDelta().y() > 0:
+                self.zoom_in()
+            else:
+                self.zoom_out()
+            event.accept()
+        else:
+            super().wheelEvent(event)
+
     def _refresh(self) -> None:
         if not self._state or self._state.annotated is None:
             self.clear()
             return
         pixmap = self._to_pixmap(self._state.annotated)
+        if self._zoom_level != 1.0:
+            scaled_size = pixmap.size() * self._zoom_level
+            pixmap = pixmap.scaled(scaled_size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
         self.setPixmap(pixmap)
         self.resize(pixmap.size())
 
     def show_temp_image(self, image: np.ndarray) -> None:
         pixmap = self._to_pixmap(image)
+        if self._zoom_level != 1.0:
+            scaled_size = pixmap.size() * self._zoom_level
+            pixmap = pixmap.scaled(scaled_size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
         self.setPixmap(pixmap)
         self.resize(pixmap.size())
 
@@ -101,20 +155,38 @@ class ImageCanvas(QtWidgets.QLabel):
         offset_x = (label_size.width() - displayed_w) / 2
         offset_y = (label_size.height() - displayed_h) / 2
 
-        x = int((point.x() - offset_x) / scale)
-        y = int((point.y() - offset_y) / scale)
+        x = int((point.x() - offset_x) / (scale * self._zoom_level))
+        y = int((point.y() - offset_y) / (scale * self._zoom_level))
 
         if x < 0 or y < 0:
             return None
-        if x >= pixmap_size.width() or y >= pixmap_size.height():
+        original_width = int(pixmap_size.width() / self._zoom_level)
+        original_height = int(pixmap_size.height() / self._zoom_level)
+        if x >= original_width or y >= original_height:
             return None
         return x, y
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
-        if event.modifiers() & QtCore.Qt.AltModifier:
+        if not (event.modifiers() & QtCore.Qt.AltModifier):
+            self._last_point = None
+            self._shape_start_point = None
+            self._is_drawing_shape = False
+            super().mousePressEvent(event)
+            return
+
+        if self._drawing_mode == DrawMode.FREE_HAND:
+            # Free-hand drawing
             self._last_point = event.position().toPoint()
         else:
-            self._last_point = None
+            # Shape drawing (rectangle or ellipse)
+            pos = self._image_pos(event.position().toPoint())
+            if pos:
+                self._shape_start_point = pos
+                self._is_drawing_shape = True
+                # Save current state for preview
+                if self._state and self._state.annotated is not None:
+                    self._temp_image = self._state.annotated.copy()
+        
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
@@ -123,30 +195,141 @@ class ImageCanvas(QtWidgets.QLabel):
         if not (event.modifiers() & QtCore.Qt.AltModifier):
             self._last_point = None
             return
-        current_point = event.position().toPoint()
-        if self._last_point is None:
-            self._last_point = current_point
-            return
 
-        p1 = self._image_pos(self._last_point)
-        p2 = self._image_pos(current_point)
-        if p1 is None or p2 is None:
-            self._last_point = current_point
-            return
+        if self._drawing_mode == DrawMode.FREE_HAND:
+            # Free-hand drawing
+            current_point = event.position().toPoint()
+            if self._last_point is None:
+                self._last_point = current_point
+                return
 
-        if self._draw_mode:
-            cv2.line(
+            p1 = self._image_pos(self._last_point)
+            p2 = self._image_pos(current_point)
+            if p1 is None or p2 is None:
+                self._last_point = current_point
+                return
+
+            if self._draw_mode:
+                cv2.line(
+                    self._state.annotated,
+                    p1,
+                    p2,
+                    self._brush_color,
+                    int(self._brush_size),
+                )
+            else:
+                self._erase_at(p2)
+
+            self._last_point = current_point
+            self._refresh()
+        
+        elif self._is_drawing_shape and self._shape_start_point:
+            # Shape drawing preview
+            current_pos = self._image_pos(event.position().toPoint())
+            if current_pos and self._temp_image is not None:
+                # Restore temp image for preview
+                self._state.annotated = self._temp_image.copy()
+                
+                # Draw preview shape
+                if self._draw_mode:
+                    self._draw_shape_preview(self._shape_start_point, current_pos)
+                else:
+                    # For eraser, show empty preview
+                    pass
+                
+                self._refresh()
+
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
+        if self._is_drawing_shape and self._shape_start_point:
+            # Finalize shape drawing
+            current_pos = self._image_pos(event.position().toPoint())
+            if current_pos and self._state and self._state.annotated is not None:
+                if self._temp_image is not None:
+                    self._state.annotated = self._temp_image.copy()
+                
+                if self._draw_mode:
+                    self._draw_shape_final(self._shape_start_point, current_pos)
+                else:
+                    self._erase_shape(self._shape_start_point, current_pos)
+                
+                self._refresh()
+            
+            # Reset shape drawing state
+            self._shape_start_point = None
+            self._is_drawing_shape = False
+            self._temp_image = None
+        
+        super().mouseReleaseEvent(event)
+
+    def _draw_shape_preview(self, start: tuple[int, int], end: tuple[int, int]) -> None:
+        """Draw a preview of the shape being drawn"""
+        if not self._state or self._state.annotated is None:
+            return
+        
+        if self._drawing_mode == DrawMode.RECTANGLE:
+            cv2.rectangle(
                 self._state.annotated,
-                p1,
-                p2,
+                start,
+                end,
                 self._brush_color,
                 int(self._brush_size),
             )
-        else:
-            self._erase_at(p2)
+        elif self._drawing_mode == DrawMode.ELLIPSE:
+            center_x = (start[0] + end[0]) // 2
+            center_y = (start[1] + end[1]) // 2
+            radius_x = abs(end[0] - start[0]) // 2
+            radius_y = abs(end[1] - start[1]) // 2
+            if radius_x > 0 and radius_y > 0:
+                cv2.ellipse(
+                    self._state.annotated,
+                    (center_x, center_y),
+                    (radius_x, radius_y),
+                    0,
+                    0,
+                    360,
+                    self._brush_color,
+                    int(self._brush_size),
+                )
 
-        self._last_point = current_point
-        self._refresh()
+    def _draw_shape_final(self, start: tuple[int, int], end: tuple[int, int]) -> None:
+        """Draw the final shape"""
+        self._draw_shape_preview(start, end)
+
+    def _erase_shape(self, start: tuple[int, int], end: tuple[int, int]) -> None:
+        """Erase a rectangular or elliptical area"""
+        if not self._state or self._state.annotated is None or self._state.original is None:
+            return
+        
+        x1, y1 = start
+        x2, y2 = end
+        
+        # Ensure proper ordering
+        x1, x2 = min(x1, x2), max(x1, x2)
+        y1, y2 = min(y1, y2), max(y1, y2)
+        
+        # Bounds checking
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(self._state.annotated.shape[1], x2)
+        y2 = min(self._state.annotated.shape[0], y2)
+        
+        if self._drawing_mode == DrawMode.RECTANGLE:
+            # Erase rectangle area
+            self._state.annotated[y1:y2, x1:x2] = self._state.original[y1:y2, x1:x2]
+        elif self._drawing_mode == DrawMode.ELLIPSE:
+            # Create ellipse mask
+            mask = np.zeros((y2-y1, x2-x1), dtype=np.uint8)
+            center_x = (x2 - x1) // 2
+            center_y = (y2 - y1) // 2
+            radius_x = center_x
+            radius_y = center_y
+            if radius_x > 0 and radius_y > 0:
+                cv2.ellipse(mask, (center_x, center_y), (radius_x, radius_y), 0, 0, 360, 255, -1)
+                # Apply mask to erase
+                region = self._state.annotated[y1:y2, x1:x2]
+                original_region = self._state.original[y1:y2, x1:x2]
+                for i in range(3):  # For each color channel
+                    region[:, :, i] = np.where(mask > 0, original_region[:, :, i], region[:, :, i])
 
     def _erase_at(self, point: tuple[int, int]) -> None:
         if not self._state or self._state.annotated is None or self._state.original is None:
@@ -160,18 +343,11 @@ class ImageCanvas(QtWidgets.QLabel):
         self._state.annotated[y1:y2, x1:x2] = self._state.original[y1:y2, x1:x2]
 
 
-class ImageWindow(QtWidgets.QMainWindow):
-    def __init__(self) -> None:
-        super().__init__()
-        self.setWindowTitle("Main View")
-        self.canvas = ImageCanvas()
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidget(self.canvas)
-        scroll.setWidgetResizable(True)
-        self.setCentralWidget(scroll)
+# Keep old ImageCanvas for compatibility
+ImageCanvas = ZoomableImageCanvas
 
-    def set_state(self, state: ImageState) -> None:
-        self.canvas.set_state(state)
+
+# Removed ImageWindow - now integrated into main tab widget
 
 
 class PreviewDialog(QtWidgets.QDialog):
@@ -211,112 +387,218 @@ class DefectDetectApp(QtCore.QObject):
         self.current_index = 0
         self._preview_windows: List[QtWidgets.QDialog] = []
 
-        self.main_window = QtWidgets.QWidget()
+        # Main window with tabs
+        self.main_window = QtWidgets.QMainWindow()
         self.main_window.setWindowTitle("DefectDetect")
         self.main_window.setWindowIcon(QtGui.QIcon(str(RESOURCES / "logo-mini.png")))
-        self.main_layout = QtWidgets.QVBoxLayout(self.main_window)
+        self.main_window.resize(1200, 800)
 
+        # Central widget with tab widget
+        central_widget = QtWidgets.QWidget()
+        self.main_window.setCentralWidget(central_widget)
+        main_layout = QtWidgets.QVBoxLayout(central_widget)
+
+        # Logo at top
         logo = QtWidgets.QLabel()
         logo_pixmap = QtGui.QPixmap(str(RESOURCES / "logo.png"))
-        logo.setPixmap(logo_pixmap)
-        logo.setScaledContents(True)
-        self.main_layout.addWidget(logo)
+        logo.setPixmap(logo_pixmap.scaled(400, 100, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+        logo.setAlignment(QtCore.Qt.AlignCenter)
+        main_layout.addWidget(logo)
 
-        self.image_window = ImageWindow()
-        self.image_window.setWindowIcon(QtGui.QIcon(str(RESOURCES / "logo-mini.png")))
+        # Tab widget
+        self.tab_widget = QtWidgets.QTabWidget()
+        main_layout.addWidget(self.tab_widget)
 
-        self._build_settings_window()
-        self._build_tools_window()
-        self._build_main_buttons()
-        self._build_end_annotation_window()
+        # Build all tabs
+        self._build_home_tab()
+        self._build_image_tab()
+        self._build_tools_tab()
+        self._build_settings_tab()
+        self._build_export_tab()
 
-    def _build_main_buttons(self) -> None:
+        # Initially disable tabs until image is loaded
+        self._set_tabs_enabled(False)
+
+    def _set_tabs_enabled(self, enabled: bool) -> None:
+        """Enable/disable tabs that require an image to be loaded"""
+        for i in range(1, self.tab_widget.count()):
+            self.tab_widget.setTabEnabled(i, enabled)
+
+    def _build_home_tab(self) -> None:
+        """Home tab with main actions"""
+        home_widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(home_widget)
+        layout.setSpacing(10)
+
+        # Add some spacing at top
+        layout.addStretch()
+
         load_image_btn = QtWidgets.QPushButton("Load Image")
+        load_image_btn.setMinimumHeight(50)
         load_multi_btn = QtWidgets.QPushButton("Load Multiple Images")
+        load_multi_btn.setMinimumHeight(50)
         load_session_btn = QtWidgets.QPushButton("Load Session")
-        settings_btn = QtWidgets.QPushButton("Settings")
+        load_session_btn.setMinimumHeight(50)
 
-        self.main_layout.addWidget(load_image_btn)
-        self.main_layout.addWidget(load_multi_btn)
-        self.main_layout.addWidget(load_session_btn)
-        self.main_layout.addWidget(settings_btn)
+        layout.addWidget(load_image_btn)
+        layout.addWidget(load_multi_btn)
+        layout.addWidget(load_session_btn)
+        layout.addStretch()
 
         load_image_btn.clicked.connect(lambda: self._on_load_action(1))
         load_multi_btn.clicked.connect(lambda: self._on_load_action(3))
         load_session_btn.clicked.connect(lambda: self._on_load_action(2))
-        settings_btn.clicked.connect(self.settings_window.show)
 
-    def _build_tools_window(self) -> None:
-        self.tools_window = QtWidgets.QWidget()
-        self.tools_window.setWindowTitle("DefectDetect")
-        self.tools_window.setWindowIcon(QtGui.QIcon(str(RESOURCES / "logo-mini.png")))
-        self.tools_layout = QtWidgets.QVBoxLayout(self.tools_window)
+        self.tab_widget.addTab(home_widget, "Home")
 
-        marker_layout = QtWidgets.QHBoxLayout()
-        self.tools_layout.addLayout(marker_layout)
+    def _build_image_tab(self) -> None:
+        """Image view tab with canvas and zoom controls"""
+        image_widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(image_widget)
 
+        # Zoom controls
+        zoom_toolbar = QtWidgets.QHBoxLayout()
+        zoom_in_btn = QtWidgets.QPushButton("Zoom In (+)")
+        zoom_out_btn = QtWidgets.QPushButton("Zoom Out (-)")
+        zoom_reset_btn = QtWidgets.QPushButton("Reset Zoom (1:1)")
+        zoom_label = QtWidgets.QLabel("Ctrl + Mouse Wheel to zoom")
+        
+        zoom_toolbar.addWidget(zoom_in_btn)
+        zoom_toolbar.addWidget(zoom_out_btn)
+        zoom_toolbar.addWidget(zoom_reset_btn)
+        zoom_toolbar.addStretch()
+        zoom_toolbar.addWidget(zoom_label)
+        layout.addLayout(zoom_toolbar)
+
+        # Image canvas with scroll area
+        self.canvas = ZoomableImageCanvas()
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidget(self.canvas)
+        scroll.setWidgetResizable(False)
+        layout.addWidget(scroll)
+
+        zoom_in_btn.clicked.connect(self.canvas.zoom_in)
+        zoom_out_btn.clicked.connect(self.canvas.zoom_out)
+        zoom_reset_btn.clicked.connect(self.canvas.reset_zoom)
+
+        self.tab_widget.addTab(image_widget, "Image View")
+
+    def _build_tools_tab(self) -> None:
+        """Tools tab with markers, thickness, and actions"""
+        tools_widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tools_widget)
+
+        # Drawing mode section
+        draw_mode_group = QtWidgets.QGroupBox("Drawing Mode")
+        draw_mode_layout = QtWidgets.QHBoxLayout(draw_mode_group)
+        
+        self.draw_mode_buttons = []
+        
+        freehand_btn = QtWidgets.QPushButton("✏️ Free-hand")
+        freehand_btn.setCheckable(True)
+        freehand_btn.setChecked(True)
+        freehand_btn.clicked.connect(lambda: self._set_drawing_mode(DrawMode.FREE_HAND))
+        draw_mode_layout.addWidget(freehand_btn)
+        self.draw_mode_buttons.append(freehand_btn)
+        
+        rect_btn = QtWidgets.QPushButton("▭ Rectangle")
+        rect_btn.setCheckable(True)
+        rect_btn.clicked.connect(lambda: self._set_drawing_mode(DrawMode.RECTANGLE))
+        draw_mode_layout.addWidget(rect_btn)
+        self.draw_mode_buttons.append(rect_btn)
+        
+        ellipse_btn = QtWidgets.QPushButton("⬭ Ellipse")
+        ellipse_btn.setCheckable(True)
+        ellipse_btn.clicked.connect(lambda: self._set_drawing_mode(DrawMode.ELLIPSE))
+        draw_mode_layout.addWidget(ellipse_btn)
+        self.draw_mode_buttons.append(ellipse_btn)
+        
+        layout.addWidget(draw_mode_group)
+
+        # Markers section
+        marker_group = QtWidgets.QGroupBox("Markers")
+        marker_layout = QtWidgets.QVBoxLayout(marker_group)
+        
+        marker_buttons_layout = QtWidgets.QHBoxLayout()
         self.marker_buttons = []
-        self._add_marker_button(marker_layout, "1.png", self.cfg.names[0], 1)
-        self._add_marker_button(marker_layout, "2.png", self.cfg.names[1], 2)
-        self._add_marker_button(marker_layout, "3.png", self.cfg.names[2], 3)
-        self._add_marker_button(marker_layout, "4.png", self.cfg.names[3], 4)
-        self._add_marker_button(marker_layout, "8.png", self.cfg.names[4], 8)
-        self._add_marker_button(marker_layout, "5.png", self.cfg.names[6], 5, text=True)
-        self._add_marker_button(marker_layout, "6.png", self.cfg.names[7], 6, text=True)
-        self._add_marker_button(marker_layout, "7.png", self.cfg.names[5], 7, text=True)
+        self._add_marker_button(marker_buttons_layout, "1.png", self.cfg.names[0], 1)
+        self._add_marker_button(marker_buttons_layout, "2.png", self.cfg.names[1], 2)
+        self._add_marker_button(marker_buttons_layout, "3.png", self.cfg.names[2], 3)
+        self._add_marker_button(marker_buttons_layout, "4.png", self.cfg.names[3], 4)
+        self._add_marker_button(marker_buttons_layout, "8.png", self.cfg.names[4], 8)
+        marker_layout.addLayout(marker_buttons_layout)
 
+        marker_buttons_layout2 = QtWidgets.QHBoxLayout()
+        self._add_marker_button(marker_buttons_layout2, "5.png", self.cfg.names[6], 5, text=True)
+        self._add_marker_button(marker_buttons_layout2, "6.png", self.cfg.names[7], 6, text=True)
+        self._add_marker_button(marker_buttons_layout2, "7.png", self.cfg.names[5], 7, text=True)
+        marker_layout.addLayout(marker_buttons_layout2)
+
+        # Thickness controls
+        thickness_layout = QtWidgets.QHBoxLayout()
         thickness_label = QtWidgets.QLabel("Thickness:")
-        marker_layout.addWidget(thickness_label)
-
+        thickness_layout.addWidget(thickness_label)
         for icon, size in [("najtanji.png", 10), ("srednji.png", 20), ("najdeblji.png", 30)]:
             btn = QtWidgets.QToolButton()
             btn.setIcon(QtGui.QIcon(str(RESOURCES / icon)))
             btn.setToolTip(str(size))
             btn.clicked.connect(lambda _=False, s=size: self._set_marker_thickness(s))
-            marker_layout.addWidget(btn)
+            thickness_layout.addWidget(btn)
+        thickness_layout.addStretch()
+        marker_layout.addLayout(thickness_layout)
+        layout.addWidget(marker_group)
 
-        action_layout = QtWidgets.QHBoxLayout()
-        self.tools_layout.addLayout(action_layout)
+        # Actions section
+        actions_group = QtWidgets.QGroupBox("Actions")
+        actions_layout = QtWidgets.QVBoxLayout(actions_group)
 
+        action_row1 = QtWidgets.QHBoxLayout()
         remove_btn = QtWidgets.QPushButton("Remove Annotations")
         remove_btn.pressed.connect(self._show_original)
         remove_btn.released.connect(self._show_annotated)
-        action_layout.addWidget(remove_btn)
+        action_row1.addWidget(remove_btn)
 
         delete_btn = QtWidgets.QPushButton("Delete Annotations...")
         delete_btn.clicked.connect(self._confirm_delete_annotations)
-        action_layout.addWidget(delete_btn)
+        action_row1.addWidget(delete_btn)
+        actions_layout.addLayout(action_row1)
 
-        end_btn = QtWidgets.QPushButton("End Annotation...")
-        end_btn.clicked.connect(self._on_end_annotation)
-        action_layout.addWidget(end_btn)
+        action_row2 = QtWidgets.QHBoxLayout()
+        save_image_btn = QtWidgets.QPushButton("Save Session")
+        save_image_btn.clicked.connect(self._save_session)
+        action_row2.addWidget(save_image_btn)
 
         end_session_btn = QtWidgets.QPushButton("End Session")
         end_session_btn.clicked.connect(self._end_session)
-        action_layout.addWidget(end_session_btn)
+        action_row2.addWidget(end_session_btn)
+        actions_layout.addLayout(action_row2)
+        layout.addWidget(actions_group)
 
-        navigation_layout = QtWidgets.QHBoxLayout()
-        self.tools_layout.addLayout(navigation_layout)
-
-        prev_btn = QtWidgets.QToolButton()
-        prev_btn.setText("Previous")
+        # Navigation section
+        nav_group = QtWidgets.QGroupBox("Navigation")
+        nav_layout = QtWidgets.QHBoxLayout(nav_group)
+        
+        prev_btn = QtWidgets.QPushButton("← Previous Image")
         prev_btn.clicked.connect(self._prev_image)
-        navigation_layout.addWidget(prev_btn)
+        nav_layout.addWidget(prev_btn)
 
-        next_btn = QtWidgets.QToolButton()
-        next_btn.setText("Next")
+        next_btn = QtWidgets.QPushButton("Next Image →")
         next_btn.clicked.connect(self._next_image)
-        navigation_layout.addWidget(next_btn)
+        nav_layout.addWidget(next_btn)
+        layout.addWidget(nav_group)
 
-    def _build_settings_window(self) -> None:
-        self.settings_window = QtWidgets.QWidget()
-        self.settings_window.setWindowTitle("Settings")
-        self.settings_window.setWindowIcon(QtGui.QIcon(str(RESOURCES / "logo-mini.png")))
-        layout = QtWidgets.QVBoxLayout(self.settings_window)
+        layout.addStretch()
+        self.tab_widget.addTab(tools_widget, "Tools")
+
+    def _build_settings_tab(self) -> None:
+        """Settings tab"""
+        settings_widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(settings_widget)
 
         tabs = QtWidgets.QTabWidget()
         layout.addWidget(tabs)
 
+        # Names sub-tab
         tab_names = QtWidgets.QWidget()
         names_layout = QtWidgets.QFormLayout(tab_names)
         self.name_edits = []
@@ -337,6 +619,7 @@ class DefectDetectApp(QtCore.QObject):
             names_layout.addRow(label, edit)
         tabs.addTab(tab_names, "Names")
 
+        # Patches sub-tab
         tab_patches = QtWidgets.QWidget()
         patches_layout = QtWidgets.QFormLayout(tab_patches)
         self.patch_width_edit = QtWidgets.QLineEdit()
@@ -357,6 +640,7 @@ class DefectDetectApp(QtCore.QObject):
         patches_layout.addRow("Vertical stride:", self.patch_stride_y_edit)
         tabs.addTab(tab_patches, "Patches")
 
+        # Other sub-tab
         tab_other = QtWidgets.QWidget()
         other_layout = QtWidgets.QFormLayout(tab_other)
         self.thickness_combo = QtWidgets.QComboBox()
@@ -379,6 +663,7 @@ class DefectDetectApp(QtCore.QObject):
         other_layout.addRow("Choose ratio (1-100):", self.tolerance_edit)
         tabs.addTab(tab_other, "Other")
 
+        # Buttons
         buttons_layout = QtWidgets.QHBoxLayout()
         layout.addLayout(buttons_layout)
         default_btn = QtWidgets.QPushButton("Default")
@@ -391,34 +676,77 @@ class DefectDetectApp(QtCore.QObject):
         save_btn.clicked.connect(self._save_settings)
 
         self._sync_settings_ui()
+        self.tab_widget.addTab(settings_widget, "Settings")
 
-    def _build_end_annotation_window(self) -> None:
-        self.end_annotation_window = QtWidgets.QWidget()
-        self.end_annotation_window.setWindowTitle("End of annotating")
-        self.end_annotation_window.setWindowIcon(QtGui.QIcon(str(RESOURCES / "logo-mini.png")))
-        layout = QtWidgets.QVBoxLayout(self.end_annotation_window)
+    def _build_export_tab(self) -> None:
+        """Export tab with all export options"""
+        export_widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(export_widget)
+
+        # Main actions
+        main_group = QtWidgets.QGroupBox("Generate & Preview")
+        main_layout = QtWidgets.QVBoxLayout(main_group)
 
         show_masks_btn = QtWidgets.QPushButton("Show Masks")
         show_masks_btn.clicked.connect(self._show_masks)
-        layout.addWidget(show_masks_btn)
+        main_layout.addWidget(show_masks_btn)
 
         create_patches_btn = QtWidgets.QPushButton("Create Patches...")
         create_patches_btn.clicked.connect(self._open_patch_dim_window)
-        layout.addWidget(create_patches_btn)
+        main_layout.addWidget(create_patches_btn)
+        layout.addWidget(main_group)
 
-        export_patches_btn = QtWidgets.QPushButton("Export patches...")
-        export_patches_btn.clicked.connect(self._open_export_window)
-        layout.addWidget(export_patches_btn)
+        # Export options
+        export_group = QtWidgets.QGroupBox("Export Options")
+        export_layout = QtWidgets.QVBoxLayout(export_group)
 
-        save_image_btn = QtWidgets.QPushButton("Save image")
-        save_image_btn.clicked.connect(self._save_session)
-        layout.addWidget(save_image_btn)
+        self._export_mask_yes = QtWidgets.QCheckBox("Yes")
+        self._export_mask_no = QtWidgets.QCheckBox("No")
+        self._export_mask_no.setChecked(True)
+        self._pair_checkbox(self._export_mask_yes, self._export_mask_no)
+        export_layout.addWidget(self._wrap_checkbox("Mask export:", self._export_mask_yes, self._export_mask_no))
 
+        self._json_collective = QtWidgets.QCheckBox("Collective")
+        self._json_individual = QtWidgets.QCheckBox("Individual")
+        self._json_collective.setChecked(True)
+        self._pair_checkbox(self._json_collective, self._json_individual)
+        export_layout.addWidget(self._wrap_checkbox("JSON file export:", self._json_collective, self._json_individual))
+
+        self._yolo_yes = QtWidgets.QCheckBox("Yes")
+        self._yolo_no = QtWidgets.QCheckBox("No")
+        self._yolo_no.setChecked(True)
+        self._pair_checkbox(self._yolo_yes, self._yolo_no)
+        export_layout.addWidget(self._wrap_checkbox("YOLO export:", self._yolo_yes, self._yolo_no))
+
+        self._pascal_yes = QtWidgets.QCheckBox("Yes")
+        self._pascal_no = QtWidgets.QCheckBox("No")
+        self._pascal_no.setChecked(True)
+        self._pair_checkbox(self._pascal_yes, self._pascal_no)
+        export_layout.addWidget(self._wrap_checkbox("Pascal VOC export:", self._pascal_yes, self._pascal_no))
+        layout.addWidget(export_group)
+
+        # Export buttons
+        export_buttons_group = QtWidgets.QGroupBox("Export Patches")
+        export_buttons_layout = QtWidgets.QVBoxLayout(export_buttons_group)
+
+        export_all_btn = QtWidgets.QPushButton("Export All Patches")
+        export_all_btn.clicked.connect(self._export_all)
+        export_buttons_layout.addWidget(export_all_btn)
+
+        export_selected_btn = QtWidgets.QPushButton("Export Selected Patches...")
+        export_selected_btn.clicked.connect(self._open_grades_window)
+        export_buttons_layout.addWidget(export_selected_btn)
+        layout.addWidget(export_buttons_group)
+
+        layout.addStretch()
+        self.tab_widget.addTab(export_widget, "Export")
+
+        # Build dialogs
         self._build_patch_dim_window()
-        self._build_export_window()
+        self._build_grades_window()
 
     def _build_patch_dim_window(self) -> None:
-        self.patch_dim_window = QtWidgets.QDialog(self.end_annotation_window)
+        self.patch_dim_window = QtWidgets.QDialog(self.main_window)
         self.patch_dim_window.setWindowTitle("Creating patches")
         self.patch_dim_window.setWindowIcon(QtGui.QIcon(str(RESOURCES / "logo-mini.png")))
         layout = QtWidgets.QVBoxLayout(self.patch_dim_window)
@@ -437,48 +765,8 @@ class DefectDetectApp(QtCore.QObject):
         create_btn.clicked.connect(self._create_patches)
         btn_layout.addWidget(create_btn)
 
-    def _build_export_window(self) -> None:
-        self.choose_export_window = QtWidgets.QDialog(self.end_annotation_window)
-        self.choose_export_window.setWindowTitle("Export type selection")
-        self.choose_export_window.setWindowIcon(QtGui.QIcon(str(RESOURCES / "logo-mini.png")))
-        layout = QtWidgets.QVBoxLayout(self.choose_export_window)
-
-        export_all_btn = QtWidgets.QPushButton("Export all patches")
-        export_selected_btn = QtWidgets.QPushButton("Export selected patches...")
-        layout.addWidget(export_all_btn)
-        layout.addWidget(export_selected_btn)
-
-        self._export_mask_yes = QtWidgets.QCheckBox("Yes")
-        self._export_mask_no = QtWidgets.QCheckBox("No")
-        self._export_mask_no.setChecked(True)
-        self._pair_checkbox(self._export_mask_yes, self._export_mask_no)
-        layout.addWidget(self._wrap_checkbox("Mask export:", self._export_mask_yes, self._export_mask_no))
-
-        self._json_collective = QtWidgets.QCheckBox("Collective")
-        self._json_individual = QtWidgets.QCheckBox("Individual")
-        self._json_collective.setChecked(True)
-        self._pair_checkbox(self._json_collective, self._json_individual)
-        layout.addWidget(self._wrap_checkbox("JSON file export:", self._json_collective, self._json_individual))
-
-        self._yolo_yes = QtWidgets.QCheckBox("Yes")
-        self._yolo_no = QtWidgets.QCheckBox("No")
-        self._yolo_no.setChecked(True)
-        self._pair_checkbox(self._yolo_yes, self._yolo_no)
-        layout.addWidget(self._wrap_checkbox("YOLO export:", self._yolo_yes, self._yolo_no))
-
-        self._pascal_yes = QtWidgets.QCheckBox("Yes")
-        self._pascal_no = QtWidgets.QCheckBox("No")
-        self._pascal_no.setChecked(True)
-        self._pair_checkbox(self._pascal_yes, self._pascal_no)
-        layout.addWidget(self._wrap_checkbox("Pascal VOC export:", self._pascal_yes, self._pascal_no))
-
-        export_all_btn.clicked.connect(self._export_all)
-        export_selected_btn.clicked.connect(self._open_grades_window)
-
-        self._build_grades_window()
-
     def _build_grades_window(self) -> None:
-        self.grades_window = QtWidgets.QDialog(self.choose_export_window)
+        self.grades_window = QtWidgets.QDialog(self.main_window)
         self.grades_window.setWindowTitle("Exporting patches")
         self.grades_window.setWindowIcon(QtGui.QIcon(str(RESOURCES / "logo-mini.png")))
         layout = QtWidgets.QVBoxLayout(self.grades_window)
@@ -557,12 +845,29 @@ class DefectDetectApp(QtCore.QObject):
         save_config(self.config_path, self.cfg)
         self._update_canvas_brush()
 
+    def _set_drawing_mode(self, mode: DrawMode) -> None:
+        """Set the drawing mode and update button states"""
+        if hasattr(self, 'canvas'):
+            self.canvas.set_drawing_mode(mode)
+        
+        # Update button states
+        for i, btn in enumerate(self.draw_mode_buttons):
+            if i == 0 and mode == DrawMode.FREE_HAND:
+                btn.setChecked(True)
+            elif i == 1 and mode == DrawMode.RECTANGLE:
+                btn.setChecked(True)
+            elif i == 2 and mode == DrawMode.ELLIPSE:
+                btn.setChecked(True)
+            else:
+                btn.setChecked(False)
+
     def _update_canvas_brush(self, marker_id: Optional[int] = None) -> None:
         marker = marker_id if marker_id is not None else getattr(self, "current_marker", 1)
         self.current_marker = marker
         draw_mode = marker != 7
         color = self._marker_color(marker)
-        self.image_window.canvas.set_brush(color, self.cfg.marker_thickness, draw_mode)
+        if hasattr(self, 'canvas'):
+            self.canvas.set_brush(color, self.cfg.marker_thickness, draw_mode)
 
     def _marker_color(self, marker_id: int) -> tuple[int, int, int]:
         mapping = {
@@ -619,9 +924,9 @@ class DefectDetectApp(QtCore.QObject):
                 self._load_image(self.file_list[self.current_index])
 
         if self.state.annotated is not None:
-            self.image_window.set_state(self.state)
-            self.image_window.show()
-            self.tools_window.show()
+            self.canvas.set_state(self.state)
+            self._set_tabs_enabled(True)
+            self.tab_widget.setCurrentIndex(1)  # Switch to Image View tab
 
     def _collect_images(self, folder: Path) -> List[Path]:
         exts = {".png", ".jpg", ".jpeg", ".bmp"}
@@ -673,39 +978,39 @@ class DefectDetectApp(QtCore.QObject):
             return
         self.current_index -= 1
         self._load_image(self.file_list[self.current_index])
-        self.image_window.set_state(self.state)
+        self.canvas.set_state(self.state)
 
     def _next_image(self) -> None:
         if not self.file_list or self.current_index >= len(self.file_list) - 1:
             return
         self.current_index += 1
         self._load_image(self.file_list[self.current_index])
-        self.image_window.set_state(self.state)
+        self.canvas.set_state(self.state)
 
     def _show_original(self) -> None:
         if self.state.original is None:
             return
-        self.image_window.canvas.show_temp_image(self.state.original)
+        self.canvas.show_temp_image(self.state.original)
 
     def _show_annotated(self) -> None:
         if self.state.original is None:
             return
         if self.state.annotated is None:
             self.state.annotated = self.state.original.copy()
-        self.image_window.canvas.set_state(self.state)
+        self.canvas.set_state(self.state)
 
     def _confirm_delete_annotations(self) -> None:
         if self.state.original is None:
             return
         reply = QtWidgets.QMessageBox.question(
-            self.tools_window,
+            self.main_window,
             "Deleting Annotations",
             "Are you sure you want to delete all annotations?",
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
         )
         if reply == QtWidgets.QMessageBox.Yes:
             self.state.annotated = self.state.original.copy()
-            self.image_window.canvas.set_state(self.state)
+            self.canvas.set_state(self.state)
 
     def _end_session(self) -> None:
         for widget in QtWidgets.QApplication.topLevelWidgets():
@@ -783,18 +1088,8 @@ class DefectDetectApp(QtCore.QObject):
                 )
             self._show_preview("Patches view", preview)
 
-    def _open_export_window(self) -> None:
-        self.choose_export_window.show()
-
     def _open_grades_window(self) -> None:
         self.grades_window.show()
-
-    def _on_end_annotation(self) -> None:
-        if self.state.annotated is None:
-            return
-        self._clear_exports()
-        self._prepare_masks()
-        self.end_annotation_window.show()
 
     def _show_masks(self) -> None:
         if self.state.annotated is None:
@@ -885,7 +1180,7 @@ class DefectDetectApp(QtCore.QObject):
         if not self.patches or not self.patch_coords:
             return
         target_dir = QtWidgets.QFileDialog.getExistingDirectory(
-            self.choose_export_window, "Choose directory", str(Path.cwd())
+            self.main_window, "Choose directory", str(Path.cwd())
         )
         if not target_dir:
             return
@@ -949,7 +1244,7 @@ class DefectDetectApp(QtCore.QObject):
                 self.ratings,
             )
 
-        self.choose_export_window.close()
+        # Export completed
 
     def _export_selected(self) -> None:
         if not self.patches or not self.patch_coords:
@@ -959,7 +1254,7 @@ class DefectDetectApp(QtCore.QObject):
             self.grades_window.close()
             return
         target_dir = QtWidgets.QFileDialog.getExistingDirectory(
-            self.choose_export_window, "Choose directory", str(Path.cwd())
+            self.main_window, "Choose directory", str(Path.cwd())
         )
         if not target_dir:
             return
@@ -1031,7 +1326,6 @@ class DefectDetectApp(QtCore.QObject):
             )
 
         self.grades_window.close()
-        self.choose_export_window.close()
 
     def _selected_indices(self) -> List[int]:
         if not self.ratings:
@@ -1062,7 +1356,7 @@ class DefectDetectApp(QtCore.QObject):
         if self.state.original is None:
             return
         target_dir = QtWidgets.QFileDialog.getExistingDirectory(
-            self.end_annotation_window, "Choose main directory", str(Path.cwd())
+            self.main_window, "Choose main directory", str(Path.cwd())
         )
         if not target_dir:
             return
@@ -1094,7 +1388,7 @@ class DefectDetectApp(QtCore.QObject):
         annotated = self.state.annotated if self.state.annotated is not None else self.state.original
         cv2.imwrite(str(result_dir / "Annotation" / f"Anotacija_{image_name}.bmp"), annotated)
 
-        QtWidgets.QMessageBox.information(self.tools_window, "Saving", "Image is saved.")
+        QtWidgets.QMessageBox.information(self.main_window, "Saving", "Image is saved.")
 
     def _image_name(self) -> str:
         if self.state.image_path:

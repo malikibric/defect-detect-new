@@ -1,5 +1,4 @@
-# DefectDetect Python config
-MarkerThickness=20
+MarkerThickness=10
 x=200
 y=200
 sx=50

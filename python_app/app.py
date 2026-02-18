@@ -60,10 +60,12 @@ class ZoomableImageCanvas(QtWidgets.QLabel):
         self._min_zoom = 0.1
         self._max_zoom = 5.0
         self._drawing_mode = DrawMode.FREE_HAND
+        self._annotation_enabled = False
         self._shape_start_point: Optional[tuple[int, int]] = None
         self._is_drawing_shape = False
         self._temp_image: Optional[np.ndarray] = None
         self._undo_stack: List[np.ndarray] = []
+        self._redo_stack: List[np.ndarray] = []
         self._max_undo = 25
 
     def set_state(self, state: ImageState) -> None:
@@ -74,25 +76,48 @@ class ZoomableImageCanvas(QtWidgets.QLabel):
         self._is_drawing_shape = False
         self._temp_image = None
         self._undo_stack = []
+        self._redo_stack = []
         self._refresh()
 
     def _push_undo_state(self) -> None:
         if not self._state or self._state.annotated is None:
             return
         self._undo_stack.append(self._state.annotated.copy())
+        self._redo_stack.clear()
         if len(self._undo_stack) > self._max_undo:
             self._undo_stack.pop(0)
 
     def undo_last_action(self) -> None:
         if not self._state or self._state.annotated is None or not self._undo_stack:
             return
+        self._redo_stack.append(self._state.annotated.copy())
+        if len(self._redo_stack) > self._max_undo:
+            self._redo_stack.pop(0)
         self._state.annotated = self._undo_stack.pop()
+        self._refresh()
+
+    def redo_last_action(self) -> None:
+        if not self._state or self._state.annotated is None or not self._redo_stack:
+            return
+        self._undo_stack.append(self._state.annotated.copy())
+        if len(self._undo_stack) > self._max_undo:
+            self._undo_stack.pop(0)
+        self._state.annotated = self._redo_stack.pop()
         self._refresh()
 
     def set_brush(self, color: tuple[int, int, int], size: int, draw_mode: bool) -> None:
         self._brush_color = color
         self._brush_size = size
         self._draw_mode = draw_mode
+
+    def set_annotation_enabled(self, enabled: bool) -> None:
+        self._annotation_enabled = enabled
+        if not enabled:
+            self._last_point = None
+            self._shape_start_point = None
+            self._is_drawing_shape = False
+            self._temp_image = None
+        self.setCursor(QtCore.Qt.CrossCursor if enabled else QtCore.Qt.ArrowCursor)
 
     def set_drawing_mode(self, mode: DrawMode) -> None:
         """Set the drawing mode (free-hand, rectangle, ellipse)"""
@@ -183,6 +208,13 @@ class ZoomableImageCanvas(QtWidgets.QLabel):
         return x, y
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        if not self._annotation_enabled:
+            self._last_point = None
+            self._shape_start_point = None
+            self._is_drawing_shape = False
+            super().mousePressEvent(event)
+            return
+
         if event.button() != QtCore.Qt.LeftButton:
             self._last_point = None
             self._shape_start_point = None
@@ -208,6 +240,10 @@ class ZoomableImageCanvas(QtWidgets.QLabel):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
+        if not self._annotation_enabled:
+            self._last_point = None
+            return
+
         if not self._state or self._state.annotated is None:
             return
         if not (event.buttons() & QtCore.Qt.LeftButton):
@@ -258,6 +294,13 @@ class ZoomableImageCanvas(QtWidgets.QLabel):
                 self._refresh()
 
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
+        if not self._annotation_enabled:
+            self._shape_start_point = None
+            self._is_drawing_shape = False
+            self._temp_image = None
+            super().mouseReleaseEvent(event)
+            return
+
         if event.button() == QtCore.Qt.LeftButton and self._is_drawing_shape and self._shape_start_point:
             # Finalize shape drawing
             current_pos = self._image_pos(event.position().toPoint())
@@ -280,9 +323,11 @@ class ZoomableImageCanvas(QtWidgets.QLabel):
         super().mouseReleaseEvent(event)
 
     def _draw_shape_preview(self, start: tuple[int, int], end: tuple[int, int]) -> None:
-        """Draw a preview of the shape being drawn - FILLED"""
+        """Draw an outline preview of the shape while dragging."""
         if not self._state or self._state.annotated is None:
             return
+
+        preview_thickness = max(2, int(self._brush_size // 3))
         
         if self._drawing_mode == DrawMode.RECTANGLE:
             cv2.rectangle(
@@ -290,7 +335,7 @@ class ZoomableImageCanvas(QtWidgets.QLabel):
                 start,
                 end,
                 self._brush_color,
-                -1,  # Filled instead of outline
+                preview_thickness,
             )
         elif self._drawing_mode == DrawMode.ELLIPSE:
             center_x = (start[0] + end[0]) // 2
@@ -306,12 +351,38 @@ class ZoomableImageCanvas(QtWidgets.QLabel):
                     0,
                     360,
                     self._brush_color,
-                    -1,  # Filled instead of outline
+                    preview_thickness,
                 )
 
     def _draw_shape_final(self, start: tuple[int, int], end: tuple[int, int]) -> None:
-        """Draw the final shape"""
-        self._draw_shape_preview(start, end)
+        """Draw the final (filled) shape after mouse release."""
+        if not self._state or self._state.annotated is None:
+            return
+
+        if self._drawing_mode == DrawMode.RECTANGLE:
+            cv2.rectangle(
+                self._state.annotated,
+                start,
+                end,
+                self._brush_color,
+                -1,
+            )
+        elif self._drawing_mode == DrawMode.ELLIPSE:
+            center_x = (start[0] + end[0]) // 2
+            center_y = (start[1] + end[1]) // 2
+            radius_x = abs(end[0] - start[0]) // 2
+            radius_y = abs(end[1] - start[1]) // 2
+            if radius_x > 0 and radius_y > 0:
+                cv2.ellipse(
+                    self._state.annotated,
+                    (center_x, center_y),
+                    (radius_x, radius_y),
+                    0,
+                    0,
+                    360,
+                    self._brush_color,
+                    -1,
+                )
 
     def _erase_shape(self, start: tuple[int, int], end: tuple[int, int]) -> None:
         """Erase a rectangular or elliptical area"""
@@ -456,16 +527,18 @@ class DefectDetectApp(QtCore.QObject):
         actions_toolbar = QtWidgets.QHBoxLayout()
         undo_btn = QtWidgets.QPushButton("Undo")
         undo_btn.clicked.connect(self._undo_annotation)
-        remove_btn = QtWidgets.QPushButton("Remove Ann")
+        redo_btn = QtWidgets.QPushButton("Redo")
+        redo_btn.clicked.connect(self._redo_annotation)
+        remove_btn = QtWidgets.QPushButton("Remove Annotations")
         remove_btn.pressed.connect(self._show_original)
         remove_btn.released.connect(self._show_annotated)
-        delete_btn = QtWidgets.QPushButton("Delete Ann")
+        delete_btn = QtWidgets.QPushButton("Delete Annotations")
         delete_btn.clicked.connect(self._confirm_delete_annotations)
         save_image_btn = QtWidgets.QPushButton("Save")
         save_image_btn.clicked.connect(self._save_session)
         end_session_btn = QtWidgets.QPushButton("End")
         end_session_btn.clicked.connect(self._end_session)
-        for btn in [undo_btn, remove_btn, delete_btn, save_image_btn, end_session_btn]:
+        for btn in [undo_btn, redo_btn, remove_btn, delete_btn, save_image_btn, end_session_btn]:
             actions_toolbar.addWidget(btn)
         actions_toolbar.addStretch()
         layout.addLayout(actions_toolbar)
@@ -495,14 +568,15 @@ class DefectDetectApp(QtCore.QObject):
 
         right_tools_tabs = QtWidgets.QTabWidget()
         right_tools_tabs.setTabPosition(QtWidgets.QTabWidget.East)
-        right_tools_tabs.setMaximumWidth(360)
+        right_tools_tabs.setMaximumWidth(300)
 
         tools_widget = QtWidgets.QWidget()
         tools_layout = QtWidgets.QVBoxLayout(tools_widget)
 
         # Drawing mode section
         draw_mode_group = QtWidgets.QGroupBox("Shapes")
-        draw_mode_layout = QtWidgets.QHBoxLayout(draw_mode_group)
+        draw_mode_layout = QtWidgets.QVBoxLayout(draw_mode_group)
+        draw_mode_layout.setSpacing(6)
         self.draw_mode_buttons = []
 
         freehand_btn = QtWidgets.QPushButton("✏️ Free-hand")
@@ -529,6 +603,16 @@ class DefectDetectApp(QtCore.QObject):
         # Markers and eraser
         marker_group = QtWidgets.QGroupBox("Markers & Eraser")
         marker_layout = QtWidgets.QVBoxLayout(marker_group)
+        marker_layout.setSpacing(8)
+
+        cursor_btn_row = QtWidgets.QHBoxLayout()
+        self.mouse_mode_btn = QtWidgets.QToolButton()
+        self.mouse_mode_btn.setToolTip("Mouse mode (disable annotation)")
+        self.mouse_mode_btn.setText("🖱")
+        self.mouse_mode_btn.clicked.connect(self._disable_annotation)
+        cursor_btn_row.addWidget(self.mouse_mode_btn)
+        cursor_btn_row.addStretch()
+        marker_layout.addLayout(cursor_btn_row)
 
         marker_buttons_layout = QtWidgets.QHBoxLayout()
         self.marker_buttons = []
@@ -553,7 +637,6 @@ class DefectDetectApp(QtCore.QObject):
             btn.setToolTip(str(size))
             btn.clicked.connect(lambda _=False, s=size: self._set_marker_thickness(s))
             thickness_layout.addWidget(btn)
-        thickness_layout.addStretch()
         marker_layout.addLayout(thickness_layout)
 
         tools_layout.addWidget(marker_group)
@@ -909,8 +992,17 @@ class DefectDetectApp(QtCore.QObject):
         self.current_marker = marker
         draw_mode = marker != 7
         color = self._marker_color(marker)
+        if marker_id is not None:
+            self._set_annotation_enabled(True)
         if hasattr(self, 'canvas'):
             self.canvas.set_brush(color, self.cfg.marker_thickness, draw_mode)
+
+    def _set_annotation_enabled(self, enabled: bool) -> None:
+        if hasattr(self, 'canvas'):
+            self.canvas.set_annotation_enabled(enabled)
+
+    def _disable_annotation(self) -> None:
+        self._set_annotation_enabled(False)
 
     def _marker_color(self, marker_id: int) -> tuple[int, int, int]:
         mapping = {
@@ -924,7 +1016,7 @@ class DefectDetectApp(QtCore.QObject):
         }
         return mapping.get(marker_id, (255, 182, 56))
 
-    def _add_marker_button(self, layout: QtWidgets.QHBoxLayout, icon: str, tooltip: str, marker_id: int, text: bool = False) -> None:
+    def _add_marker_button(self, layout: QtWidgets.QBoxLayout, icon: str, tooltip: str, marker_id: int, text: bool = False) -> None:
         btn = QtWidgets.QToolButton()
         btn.setIcon(QtGui.QIcon(str(RESOURCES / icon)))
         btn.setToolTip(tooltip)
@@ -992,6 +1084,7 @@ class DefectDetectApp(QtCore.QObject):
             self.image_states[image_path] = state
             self.state = state
         self._update_canvas_brush()
+        self._set_annotation_enabled(False)
         self._clear_exports()
 
     def _load_session(self, folder: Path) -> None:
@@ -1018,6 +1111,7 @@ class DefectDetectApp(QtCore.QObject):
 
         self.state = ImageState(original=original_image, annotated=annotated_image, image_path=None)
         self._update_canvas_brush()
+        self._set_annotation_enabled(False)
         self._clear_exports()
 
     def _load_first_image(self, folder: Path) -> Optional[np.ndarray]:
@@ -1056,6 +1150,10 @@ class DefectDetectApp(QtCore.QObject):
     def _undo_annotation(self) -> None:
         if hasattr(self, "canvas"):
             self.canvas.undo_last_action()
+
+    def _redo_annotation(self) -> None:
+        if hasattr(self, "canvas"):
+            self.canvas.redo_last_action()
 
     def _show_original(self) -> None:
         if self.state.original is None:
@@ -1317,10 +1415,14 @@ class DefectDetectApp(QtCore.QObject):
     def _rate_patch(self, patch: np.ndarray) -> int:
         white = int(cv2.countNonZero(patch))
         total = int(patch.size)
-        threshold = self.cfg.rating1_tolerance * 0.01 * total
-        if white <= total - threshold:
+        if total == 0:
             return 0
-        if white > threshold:
+
+        threshold = self.cfg.rating1_tolerance * 0.01 * total
+        # 0: too little coverage, 1: partial coverage, 2: near-full coverage
+        if white < threshold:
+            return 0
+        if white >= total - threshold:
             return 2
         return 1
 

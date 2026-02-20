@@ -138,6 +138,23 @@ class ZoomableImageCanvas(QtWidgets.QLabel):
         self._zoom_level = 1.0
         self._refresh()
 
+    def fit_to_size(self, target_size: QtCore.QSize, allow_upscale: bool = False) -> None:
+        if not self._state or self._state.annotated is None:
+            return
+
+        image_h, image_w = self._state.annotated.shape[:2]
+        if image_w <= 0 or image_h <= 0:
+            return
+
+        target_w = max(1, target_size.width())
+        target_h = max(1, target_size.height())
+        zoom = min(target_w / image_w, target_h / image_h)
+        if not allow_upscale:
+            zoom = min(zoom, 1.0)
+
+        self._zoom_level = max(self._min_zoom, min(zoom, self._max_zoom))
+        self._refresh()
+
     def wheelEvent(self, event: QtGui.QWheelEvent) -> None:
         if event.modifiers() & QtCore.Qt.ControlModifier:
             if event.angleDelta().y() > 0:
@@ -562,6 +579,7 @@ class DefectDetectApp(QtCore.QObject):
 
         self.canvas = ZoomableImageCanvas()
         scroll = QtWidgets.QScrollArea()
+        self.image_scroll = scroll
         scroll.setWidget(self.canvas)
         scroll.setWidgetResizable(False)
         content_layout.addWidget(scroll, 1)
@@ -608,7 +626,9 @@ class DefectDetectApp(QtCore.QObject):
         cursor_btn_row = QtWidgets.QHBoxLayout()
         self.mouse_mode_btn = QtWidgets.QToolButton()
         self.mouse_mode_btn.setToolTip("Mouse mode (disable annotation)")
-        self.mouse_mode_btn.setText("🖱")
+        self.mouse_mode_btn.setIcon(self._create_mouse_pointer_icon())
+        self.mouse_mode_btn.setIconSize(QtCore.QSize(18, 18))
+        self.mouse_mode_btn.setFixedSize(30, 30)
         self.mouse_mode_btn.clicked.connect(self._disable_annotation)
         cursor_btn_row.addWidget(self.mouse_mode_btn)
         cursor_btn_row.addStretch()
@@ -757,6 +777,8 @@ class DefectDetectApp(QtCore.QObject):
         """Export tab with all export options"""
         export_widget = QtWidgets.QWidget()
         layout = QtWidgets.QHBoxLayout(export_widget)
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        layout.addWidget(splitter)
 
         left_panel = QtWidgets.QWidget()
         left_layout = QtWidgets.QVBoxLayout(left_panel)
@@ -773,6 +795,13 @@ class DefectDetectApp(QtCore.QObject):
         create_patches_btn = QtWidgets.QPushButton("Create Patches...")
         create_patches_btn.clicked.connect(self._open_patch_dim_window)
         main_layout.addWidget(create_patches_btn)
+
+        patch_info = QtWidgets.QLabel(
+            "After adding/removing annotations, please click 'Create Patches' again to refresh patch data."
+        )
+        patch_info.setWordWrap(True)
+        patch_info.setStyleSheet("color: #555;")
+        main_layout.addWidget(patch_info)
         left_layout.addWidget(main_group)
 
         # Export options
@@ -818,7 +847,7 @@ class DefectDetectApp(QtCore.QObject):
         left_layout.addWidget(export_buttons_group)
 
         left_layout.addStretch()
-        layout.addWidget(left_panel)
+        splitter.addWidget(left_panel)
 
         # Right preview area (embedded instead of popup windows)
         right_panel = QtWidgets.QWidget()
@@ -860,7 +889,10 @@ class DefectDetectApp(QtCore.QObject):
 
         right_layout.addWidget(masks_group)
         right_layout.addWidget(patch_group)
-        layout.addWidget(right_panel, 1)
+        splitter.addWidget(right_panel)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([420, 780])
 
         self._update_export_mask_preview()
         self._update_export_patch_preview()
@@ -1004,6 +1036,31 @@ class DefectDetectApp(QtCore.QObject):
     def _disable_annotation(self) -> None:
         self._set_annotation_enabled(False)
 
+    def _create_mouse_pointer_icon(self) -> QtGui.QIcon:
+        pixmap = QtGui.QPixmap(24, 24)
+        pixmap.fill(QtCore.Qt.transparent)
+
+        painter = QtGui.QPainter(pixmap)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        painter.setPen(QtGui.QPen(QtGui.QColor("#1E1E1E"), 1.2))
+        painter.setBrush(QtGui.QBrush(QtGui.QColor("#FFFFFF")))
+
+        pointer = QtGui.QPolygonF(
+            [
+                QtCore.QPointF(5, 3),
+                QtCore.QPointF(5, 19),
+                QtCore.QPointF(9.2, 14.6),
+                QtCore.QPointF(12.2, 21),
+                QtCore.QPointF(14.5, 19.9),
+                QtCore.QPointF(11.5, 13.7),
+                QtCore.QPointF(18.5, 13.7),
+            ]
+        )
+        painter.drawPolygon(pointer)
+        painter.end()
+
+        return QtGui.QIcon(pixmap)
+
     def _marker_color(self, marker_id: int) -> tuple[int, int, int]:
         mapping = {
             1: (255, 182, 56),
@@ -1066,6 +1123,13 @@ class DefectDetectApp(QtCore.QObject):
             self._set_tabs_enabled(True)
             self.tab_widget.setCurrentIndex(1)  # Switch to Image View tab
             self._update_navigation_visibility()
+            QtCore.QTimer.singleShot(0, self._fit_canvas_to_view)
+
+    def _fit_canvas_to_view(self) -> None:
+        if not hasattr(self, "canvas") or not hasattr(self, "image_scroll"):
+            return
+        viewport_size = self.image_scroll.viewport().size()
+        self.canvas.fit_to_size(viewport_size)
 
     def _collect_images(self, folder: Path) -> List[Path]:
         exts = {".png", ".jpg", ".jpeg", ".bmp"}
@@ -1127,6 +1191,7 @@ class DefectDetectApp(QtCore.QObject):
         self.current_index -= 1
         self._load_image(self.file_list[self.current_index])
         self.canvas.set_state(self.state)
+        QtCore.QTimer.singleShot(0, self._fit_canvas_to_view)
         self._update_navigation_visibility()
 
     def _next_image(self) -> None:
@@ -1135,6 +1200,7 @@ class DefectDetectApp(QtCore.QObject):
         self.current_index += 1
         self._load_image(self.file_list[self.current_index])
         self.canvas.set_state(self.state)
+        QtCore.QTimer.singleShot(0, self._fit_canvas_to_view)
         self._update_navigation_visibility()
 
     def _update_navigation_visibility(self) -> None:
@@ -1501,6 +1567,11 @@ class DefectDetectApp(QtCore.QObject):
             return
         selected = self._selected_indices()
         if not selected:
+            QtWidgets.QMessageBox.warning(
+                self.main_window,
+                "No matching patches",
+                "There are no patches that have selected ratings.",
+            )
             self.grades_window.close()
             return
         target_dir = QtWidgets.QFileDialog.getExistingDirectory(

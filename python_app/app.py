@@ -469,8 +469,10 @@ class DefectDetectApp(QtCore.QObject):
         self.image_states: Dict[Path, ImageState] = {}
         self.export_mask_items: List[Tuple[str, np.ndarray]] = []
         self.export_mask_index = 0
+        self.export_mask_zoom = 1.0
         self.export_patch_image: Optional[np.ndarray] = None
         self.export_patch_title = "Patch view"
+        self.export_patch_zoom = 1.0
 
         # Main window with tabs
         self.main_window = QtWidgets.QMainWindow()
@@ -851,7 +853,7 @@ class DefectDetectApp(QtCore.QObject):
 
         # Right preview area (embedded instead of popup windows)
         right_panel = QtWidgets.QWidget()
-        right_layout = QtWidgets.QVBoxLayout(right_panel)
+        right_layout = QtWidgets.QHBoxLayout(right_panel)
 
         masks_group = QtWidgets.QGroupBox("Masks")
         masks_layout = QtWidgets.QVBoxLayout(masks_group)
@@ -860,35 +862,72 @@ class DefectDetectApp(QtCore.QObject):
         self.export_prev_mask_btn.clicked.connect(self._export_prev_mask)
         self.export_next_mask_btn = QtWidgets.QPushButton("Next →")
         self.export_next_mask_btn.clicked.connect(self._export_next_mask)
+        self.export_mask_zoom_out_btn = QtWidgets.QPushButton("Zoom -")
+        self.export_mask_zoom_out_btn.clicked.connect(self._export_mask_zoom_out)
+        self.export_mask_zoom_in_btn = QtWidgets.QPushButton("Zoom +")
+        self.export_mask_zoom_in_btn.clicked.connect(self._export_mask_zoom_in)
+        self.export_mask_zoom_reset_btn = QtWidgets.QPushButton("Fit")
+        self.export_mask_zoom_reset_btn.clicked.connect(self._export_mask_zoom_reset)
         nav_layout.addWidget(self.export_prev_mask_btn)
         nav_layout.addWidget(self.export_next_mask_btn)
         nav_layout.addStretch()
+        nav_layout.addWidget(self.export_mask_zoom_out_btn)
+        nav_layout.addWidget(self.export_mask_zoom_in_btn)
+        nav_layout.addWidget(self.export_mask_zoom_reset_btn)
         masks_layout.addLayout(nav_layout)
 
         self.export_mask_name_label = QtWidgets.QLabel("No masks shown")
         self.export_mask_name_label.setAlignment(QtCore.Qt.AlignCenter)
         masks_layout.addWidget(self.export_mask_name_label)
 
+        self.export_mask_scroll = QtWidgets.QScrollArea()
+        self.export_mask_scroll.setWidgetResizable(False)
+        self.export_mask_scroll.setAlignment(QtCore.Qt.AlignCenter)
+        self.export_mask_scroll.setMinimumSize(520, 360)
+        self.export_mask_scroll.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.export_mask_scroll.viewport().installEventFilter(self)
+
         self.export_mask_image_label = QtWidgets.QLabel()
         self.export_mask_image_label.setAlignment(QtCore.Qt.AlignCenter)
-        self.export_mask_image_label.setMinimumSize(420, 240)
-        self.export_mask_image_label.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        masks_layout.addWidget(self.export_mask_image_label)
+        self.export_mask_image_label.setMinimumSize(1, 1)
+        self.export_mask_scroll.setWidget(self.export_mask_image_label)
+        masks_layout.addWidget(self.export_mask_scroll)
 
         patch_group = QtWidgets.QGroupBox("Patch view")
         patch_layout = QtWidgets.QVBoxLayout(patch_group)
+
+        patch_nav_layout = QtWidgets.QHBoxLayout()
+        patch_nav_layout.addStretch()
+        self.export_patch_zoom_out_btn = QtWidgets.QPushButton("Zoom -")
+        self.export_patch_zoom_out_btn.clicked.connect(self._export_patch_zoom_out)
+        self.export_patch_zoom_in_btn = QtWidgets.QPushButton("Zoom +")
+        self.export_patch_zoom_in_btn.clicked.connect(self._export_patch_zoom_in)
+        self.export_patch_zoom_reset_btn = QtWidgets.QPushButton("Fit")
+        self.export_patch_zoom_reset_btn.clicked.connect(self._export_patch_zoom_reset)
+        patch_nav_layout.addWidget(self.export_patch_zoom_out_btn)
+        patch_nav_layout.addWidget(self.export_patch_zoom_in_btn)
+        patch_nav_layout.addWidget(self.export_patch_zoom_reset_btn)
+        patch_layout.addLayout(patch_nav_layout)
+
         self.export_patch_name_label = QtWidgets.QLabel("No patch view generated")
         self.export_patch_name_label.setAlignment(QtCore.Qt.AlignCenter)
         patch_layout.addWidget(self.export_patch_name_label)
 
+        self.export_patch_scroll = QtWidgets.QScrollArea()
+        self.export_patch_scroll.setWidgetResizable(False)
+        self.export_patch_scroll.setAlignment(QtCore.Qt.AlignCenter)
+        self.export_patch_scroll.setMinimumSize(520, 360)
+        self.export_patch_scroll.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.export_patch_scroll.viewport().installEventFilter(self)
+
         self.export_patch_image_label = QtWidgets.QLabel()
         self.export_patch_image_label.setAlignment(QtCore.Qt.AlignCenter)
-        self.export_patch_image_label.setMinimumSize(420, 240)
-        self.export_patch_image_label.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        patch_layout.addWidget(self.export_patch_image_label)
+        self.export_patch_image_label.setMinimumSize(1, 1)
+        self.export_patch_scroll.setWidget(self.export_patch_image_label)
+        patch_layout.addWidget(self.export_patch_scroll)
 
-        right_layout.addWidget(masks_group)
-        right_layout.addWidget(patch_group)
+        right_layout.addWidget(masks_group, 1)
+        right_layout.addWidget(patch_group, 1)
         splitter.addWidget(right_panel)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
@@ -1322,6 +1361,7 @@ class DefectDetectApp(QtCore.QObject):
                 )
             self.export_patch_image = preview
             self.export_patch_title = "Patches view"
+            self.export_patch_zoom = 1.0
             self._update_export_patch_preview()
 
     def _open_grades_window(self) -> None:
@@ -1331,6 +1371,7 @@ class DefectDetectApp(QtCore.QObject):
         if self.state.annotated is None:
             return
         self._prepare_masks()
+        self.export_mask_zoom = 1.0
         titles = [
             self.cfg.names[0],
             self.cfg.names[1],
@@ -1358,12 +1399,26 @@ class DefectDetectApp(QtCore.QObject):
         )
         return QtGui.QPixmap.fromImage(qimage)
 
-    def _set_export_preview_label(self, label: QtWidgets.QLabel, image: np.ndarray) -> None:
+    def _set_export_preview_label(
+        self,
+        label: QtWidgets.QLabel,
+        image: np.ndarray,
+        scroll: QtWidgets.QScrollArea,
+        zoom: float,
+    ) -> None:
         pixmap = self._array_to_qpixmap(image)
-        target_w = max(label.width(), 420)
-        target_h = max(label.height(), 240)
-        scaled = pixmap.scaled(target_w, target_h, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+        viewport = scroll.viewport().size()
+        target_w = max(1, viewport.width())
+        target_h = max(1, viewport.height())
+
+        fit_scale = min(target_w / pixmap.width(), target_h / pixmap.height())
+        effective_scale = max(0.1, zoom) * fit_scale
+        scaled_w = max(1, int(pixmap.width() * effective_scale))
+        scaled_h = max(1, int(pixmap.height() * effective_scale))
+
+        scaled = pixmap.scaled(scaled_w, scaled_h, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
         label.setPixmap(scaled)
+        label.resize(scaled.size())
 
     def _update_export_mask_preview(self) -> None:
         if not hasattr(self, "export_mask_name_label"):
@@ -1377,7 +1432,12 @@ class DefectDetectApp(QtCore.QObject):
 
         title, image = self.export_mask_items[self.export_mask_index]
         self.export_mask_name_label.setText(title)
-        self._set_export_preview_label(self.export_mask_image_label, image)
+        self._set_export_preview_label(
+            self.export_mask_image_label,
+            image,
+            self.export_mask_scroll,
+            self.export_mask_zoom,
+        )
         self.export_prev_mask_btn.setEnabled(self.export_mask_index > 0)
         self.export_next_mask_btn.setEnabled(self.export_mask_index < len(self.export_mask_items) - 1)
 
@@ -1389,7 +1449,36 @@ class DefectDetectApp(QtCore.QObject):
             self.export_patch_image_label.clear()
             return
         self.export_patch_name_label.setText(self.export_patch_title)
-        self._set_export_preview_label(self.export_patch_image_label, self.export_patch_image)
+        self._set_export_preview_label(
+            self.export_patch_image_label,
+            self.export_patch_image,
+            self.export_patch_scroll,
+            self.export_patch_zoom,
+        )
+
+    def _export_mask_zoom_in(self) -> None:
+        self.export_mask_zoom = min(self.export_mask_zoom * 1.2, 8.0)
+        self._update_export_mask_preview()
+
+    def _export_mask_zoom_out(self) -> None:
+        self.export_mask_zoom = max(self.export_mask_zoom / 1.2, 0.2)
+        self._update_export_mask_preview()
+
+    def _export_mask_zoom_reset(self) -> None:
+        self.export_mask_zoom = 1.0
+        self._update_export_mask_preview()
+
+    def _export_patch_zoom_in(self) -> None:
+        self.export_patch_zoom = min(self.export_patch_zoom * 1.2, 8.0)
+        self._update_export_patch_preview()
+
+    def _export_patch_zoom_out(self) -> None:
+        self.export_patch_zoom = max(self.export_patch_zoom / 1.2, 0.2)
+        self._update_export_patch_preview()
+
+    def _export_patch_zoom_reset(self) -> None:
+        self.export_patch_zoom = 1.0
+        self._update_export_patch_preview()
 
     def _export_prev_mask(self) -> None:
         if self.export_mask_index <= 0:
@@ -1484,11 +1573,15 @@ class DefectDetectApp(QtCore.QObject):
         if total == 0:
             return 0
 
-        threshold = self.cfg.rating1_tolerance * 0.01 * total
+        tolerance_ratio = max(1, min(int(self.cfg.rating1_tolerance), 99)) / 100.0
+        low_threshold = int((1.0 - tolerance_ratio) * total)
+        high_threshold = int(tolerance_ratio * total)
+
         # 0: too little coverage, 1: partial coverage, 2: near-full coverage
-        if white < threshold:
+        # Example for tolerance 95: 0 -> up to 5%, 1 -> 5-95%, 2 -> above 95%.
+        if white <= low_threshold:
             return 0
-        if white >= total - threshold:
+        if white >= high_threshold:
             return 2
         return 1
 
@@ -1572,7 +1665,6 @@ class DefectDetectApp(QtCore.QObject):
                 "No matching patches",
                 "There are no patches that have selected ratings.",
             )
-            self.grades_window.close()
             return
         target_dir = QtWidgets.QFileDialog.getExistingDirectory(
             self.main_window, "Choose directory", str(Path.cwd())
@@ -1742,10 +1834,20 @@ class DefectDetectApp(QtCore.QObject):
         self.ratings = []
         self.export_mask_items = []
         self.export_mask_index = 0
+        self.export_mask_zoom = 1.0
         self.export_patch_image = None
         self.export_patch_title = "Patch view"
+        self.export_patch_zoom = 1.0
         self._update_export_mask_preview()
         self._update_export_patch_preview()
+
+    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        if event.type() == QtCore.QEvent.Resize:
+            if hasattr(self, "export_mask_scroll") and watched is self.export_mask_scroll.viewport():
+                self._update_export_mask_preview()
+            elif hasattr(self, "export_patch_scroll") and watched is self.export_patch_scroll.viewport():
+                self._update_export_patch_preview()
+        return super().eventFilter(watched, event)
 
 
 def main() -> None:

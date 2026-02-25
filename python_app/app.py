@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import shutil
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -27,8 +28,27 @@ class DrawMode(Enum):
     ELLIPSE = "ellipse"
 
 
-APP_ROOT = Path(__file__).resolve().parent
+def _is_frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def _bundle_root() -> Path:
+    if _is_frozen():
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+    return Path(__file__).resolve().parent
+
+
+def _runtime_root() -> Path:
+    if _is_frozen():
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+APP_ROOT = _bundle_root()
+RUNTIME_ROOT = _runtime_root()
 RESOURCES = APP_ROOT / "resources"
+DEFAULT_CONFIG_PATH = APP_ROOT / "config.txt"
+CONFIG_PATH = RUNTIME_ROOT / "config.txt"
 
 
 @dataclass
@@ -456,7 +476,12 @@ ImageCanvas = ZoomableImageCanvas
 class DefectDetectApp(QtCore.QObject):
     def __init__(self) -> None:
         super().__init__()
-        self.config_path = APP_ROOT / "config.txt"
+        self.config_path = CONFIG_PATH
+        if not self.config_path.exists() and DEFAULT_CONFIG_PATH.exists():
+            try:
+                shutil.copy2(DEFAULT_CONFIG_PATH, self.config_path)
+            except OSError:
+                pass
         self.cfg = load_config(self.config_path)
         self.default_cfg = AppConfig()
         self.state = ImageState()

@@ -13,7 +13,7 @@ analysis = Analysis(
     ["app.py"],
     pathex=[project_root],
     binaries=[],
-    datas=[("resources", "resources")],
+    datas=[("resources", "resources"), ("config.txt", ".")],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

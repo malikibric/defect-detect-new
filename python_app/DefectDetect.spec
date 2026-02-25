@@ -1,11 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 import os
+import sys
 from PyInstaller.utils.hooks import collect_submodules
 
 block_cipher = None
 
-project_root = os.path.abspath(os.path.dirname(__file__))
+project_root = os.path.abspath(globals().get("SPECPATH", os.getcwd()))
 
 hiddenimports = collect_submodules("cv2")
 

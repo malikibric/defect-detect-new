@@ -66,7 +66,10 @@ def load_clip_model() -> Tuple[Any, Any]:
     return model_registry["clip_model"], model_registry["clip_processor"]
 
 
-def calculate_optimal_patch_size(annotations: List[Dict[str, Any]]) -> int:
+def calculate_optimal_patch_size(
+    annotations: List[Dict[str, Any]],
+    padding_factor: float = 1.5,
+) -> int:
     """
     Calculate optimal patch size based on annotation bounding boxes.
     
@@ -86,26 +89,14 @@ def calculate_optimal_patch_size(annotations: List[Dict[str, Any]]) -> int:
     if not annotations:
         return 224  # Default patch size
     
-    # Extract bounding box dimensions
-    widths = []
-    heights = []
-    diagonals = []
-    
-    for ann in annotations:
-        bbox = ann["bbox"]
-        w, h = bbox[2], bbox[3]
-        widths.append(w)
-        heights.append(h)
-        
-        # Calculate diagonal (larger dimension that captures full object)
-        diagonal = np.sqrt(w**2 + h**2)
-        diagonals.append(diagonal)
+    # Extract diagonal lengths from all bboxes.
+    diagonals = [np.hypot(ann["bbox"][2], ann["bbox"][3]) for ann in annotations]
     
     # Calculate median diagonal
     median_diagonal = np.median(diagonals)
     
-    # Apply padding factor (1.5x for context)
-    optimal_size = median_diagonal * 1.5
+    # Apply padding factor for context.
+    optimal_size = median_diagonal * padding_factor
     
     # Round to nearest multiple of 32 (standard for neural networks)
     optimal_size = int(np.round(optimal_size / 32) * 32)
@@ -113,8 +104,13 @@ def calculate_optimal_patch_size(annotations: List[Dict[str, Any]]) -> int:
     # Clamp to reasonable bounds
     optimal_size = max(64, min(512, optimal_size))
     
-    logger.info(f"Calculated optimal patch size: {optimal_size}px (from {len(annotations)} annotations)")
-    logger.info(f"  Median bbox diagonal: {median_diagonal:.1f}px")
+    logger.info(
+        "Calculated optimal patch size=%spx from %s annotations (median diagonal=%.1fpx, padding_factor=%.2f)",
+        optimal_size,
+        len(annotations),
+        median_diagonal,
+        padding_factor,
+    )
     
     return optimal_size
 
@@ -229,7 +225,10 @@ async def extract_patches(
     
     # Calculate optimal patch size if not provided
     if patch_size is None:
-        patch_size = calculate_optimal_patch_size(annotations)
+        patch_size = calculate_optimal_patch_size(
+            annotations,
+            padding_factor=padding_factor,
+        )
     
     logger.info(f"Using patch size: {patch_size}px")
     

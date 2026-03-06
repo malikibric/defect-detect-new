@@ -65,10 +65,10 @@ def load_diffusion_pipeline() -> Any:
                 pipeline.enable_attention_slicing()
             
             model_registry["diffusion_pipeline"] = pipeline
-            logger.info(f"Diffusion pipeline loaded successfully on {device}")
+            logger.info("Diffusion pipeline loaded successfully on %s", device)
             
         except Exception as e:
-            logger.error(f"Failed to load diffusion pipeline: {e}")
+            logger.error("Failed to load diffusion pipeline: %s", e)
             raise RuntimeError(f"Diffusion pipeline loading failed: {e}")
     
     return model_registry["diffusion_pipeline"]
@@ -235,9 +235,13 @@ async def generate_synthetic_defects(
     if severity_levels is None:
         severity_levels = ["minor", "moderate", "severe"]
     
-    logger.info(f"Generating {num_variations} synthetic variations from {image_path}")
-    logger.info(f"Lighting conditions: {lighting_conditions}")
-    logger.info(f"Severity levels: {severity_levels}")
+    logger.info(
+        "Generating %s synthetic variations from %s (lighting=%s, severity=%s)",
+        num_variations,
+        image_path,
+        lighting_conditions,
+        severity_levels,
+    )
     
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
@@ -258,7 +262,7 @@ async def generate_synthetic_defects(
     w = min(w, img_width - x)
     h = min(h, img_height - y)
     
-    logger.info(f"Defect region: x={x}, y={y}, w={w}, h={h}, class={class_name}")
+    logger.debug("Defect region x=%s y=%s w=%s h=%s class=%s", x, y, w, h, class_name)
     
     # Create mask for inpainting
     # Mask should be white (255) where we want to inpaint, black (0) elsewhere
@@ -278,7 +282,7 @@ async def generate_synthetic_defects(
     try:
         pipeline = load_diffusion_pipeline()
     except Exception as e:
-        logger.error(f"Failed to load diffusion pipeline: {e}")
+        logger.error("Failed to load diffusion pipeline: %s", e)
         # Fallback: create simple variations using traditional augmentation
         return await generate_synthetic_defects_fallback(
             image_path, annotation, num_variations, output_dir
@@ -298,8 +302,9 @@ async def generate_synthetic_defects(
         # Build prompt
         prompt = build_prompt(class_name, lighting, severity)
         
-        logger.info(f"Generating variation {i+1}/{num_variations}: {lighting}, {severity}")
-        logger.debug(f"Prompt: {prompt}")
+        if i == 0 or (i + 1) == num_variations or (i + 1) % max(1, num_variations // 5) == 0:
+            logger.info("Generating variation %s/%s", i + 1, num_variations)
+        logger.debug("Variation %s prompt (%s, %s): %s", i + 1, lighting, severity, prompt)
         
         try:
             # Generate image using Stable Diffusion inpainting
@@ -325,15 +330,19 @@ async def generate_synthetic_defects(
             generated_image.save(output_path)
             generated_paths.append(output_path)
             
-            logger.debug(f"Saved variation to {output_path}")
+            logger.debug("Saved variation to %s", output_path)
             
         except Exception as e:
-            logger.error(f"Failed to generate variation {i}: {e}")
+            logger.error("Failed to generate variation %s: %s", i, e)
             continue
     
     processing_time = time.time() - start_time
-    logger.info(f"Generated {len(generated_paths)} variations in {processing_time:.2f}s")
-    logger.info(f"Output directory: {output_dir}")
+    logger.info(
+        "Generated %s variations in %.2fs (output_dir=%s)",
+        len(generated_paths),
+        processing_time,
+        output_dir,
+    )
     
     return generated_paths
 
@@ -365,9 +374,6 @@ async def generate_synthetic_defects_fallback(
     image = cv2.imread(image_path)
     if image is None:
         raise ValueError(f"Failed to load image: {image_path}")
-    
-    bbox = annotation["bbox"]
-    x, y, w, h = [int(v) for v in bbox]
     
     generated_paths = []
     base_filename = Path(image_path).stem
@@ -408,5 +414,5 @@ async def generate_synthetic_defects_fallback(
         cv2.imwrite(output_path, augmented)
         generated_paths.append(output_path)
     
-    logger.info(f"Generated {len(generated_paths)} fallback variations")
+    logger.info("Generated %s fallback variations", len(generated_paths))
     return generated_paths

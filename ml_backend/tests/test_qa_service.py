@@ -1,7 +1,7 @@
 """
 Unit tests for QA (Quality Assurance) service.
 
-This module tests the QA service functionality including YOLO-based
+This module tests the QA service functionality including YOLO26-based
 annotation validation, IoU calculations, and defect detection comparison.
 """
 
@@ -11,6 +11,57 @@ import tempfile
 import cv2
 
 from services import qa_service
+
+
+class FakeTensor:
+    """Minimal tensor-like wrapper compatible with qa_service parsing helpers."""
+
+    def __init__(self, data):
+        self._data = np.asarray(data)
+
+    def detach(self):
+        return self
+
+    def cpu(self):
+        return self
+
+    def numpy(self):
+        return self._data
+
+
+class FakeBoxesStructured:
+    """Mock YOLO26 box container with xyxy/conf/cls fields."""
+
+    def __init__(self, xyxy, conf, cls):
+        self.xyxy = FakeTensor(xyxy)
+        self.conf = FakeTensor(conf)
+        self.cls = FakeTensor(cls)
+
+
+class FakeBoxesData:
+    """Mock YOLO26 box container with Nx6 data rows (xyxy, conf, cls)."""
+
+    def __init__(self, data):
+        self.data = FakeTensor(data)
+
+
+class FakeResult:
+    """Single inference result wrapper."""
+
+    def __init__(self, boxes):
+        self.boxes = boxes
+
+
+class FakeModel:
+    """Fake YOLO26 model returning deterministic detections."""
+
+    def __init__(self, results):
+        self._results = results
+        self.names = {0: "defect", 1: "minor_defect"}
+
+    def __call__(self, image_path: str, verbose: bool = False):
+        _ = image_path, verbose
+        return self._results
 
 
 @pytest.fixture
@@ -56,6 +107,38 @@ def human_annotations():
             "annotation_id": "human_2"
         }
     ]
+
+
+@pytest.fixture
+def mock_yolo26_structured(monkeypatch):
+    """
+    Mock YOLO26 structured output (xyxy/conf/cls fields).
+
+    Validates parser path used by most Ultralytics result objects.
+    """
+    results = [
+        FakeResult(
+            FakeBoxesStructured(
+                xyxy=[[100.2, 100.1, 150.1, 150.3], [300.0, 200.0, 350.0, 250.0]],
+                conf=[0.92, 0.88],
+                cls=[0, 0],
+            )
+        )
+    ]
+    monkeypatch.setattr(qa_service, "load_yolo_model", lambda: FakeModel(results))
+
+
+@pytest.fixture
+def mock_yolo26_data_format(monkeypatch):
+    """
+    Mock YOLO26 row-based output (boxes.data format).
+
+    Validates parser fallback for NMS-free output variants.
+    """
+    # x1, y1, x2, y2, conf, cls
+    data_rows = [[101.0, 101.0, 149.0, 149.0, 0.95, 0], [20.0, 20.0, 30.0, 30.0, 0.83, 1]]
+    results = [FakeResult(FakeBoxesData(data_rows))]
+    monkeypatch.setattr(qa_service, "load_yolo_model", lambda: FakeModel(results))
 
 
 def test_calculate_iou_identical_boxes():
@@ -127,9 +210,9 @@ def test_calculate_iou_edge_touching():
 
 
 @pytest.mark.asyncio
-async def test_run_qa_check_basic(sample_image, human_annotations):
+async def test_run_qa_check_basic(sample_image, human_annotations, mock_yolo26_structured):
     """
-    Test run_qa_check with known annotations vs YOLO output.
+    Test run_qa_check with known annotations vs mocked YOLO26 output.
     
     Validates that:
     - Function executes without errors
@@ -192,7 +275,7 @@ async def test_run_qa_check_invalid_image():
 
 
 @pytest.mark.asyncio
-async def test_run_qa_check_empty_annotations(sample_image):
+async def test_run_qa_check_empty_annotations(sample_image, mock_yolo26_structured):
     """
     Test run_qa_check with empty human annotations.
     
@@ -236,7 +319,7 @@ def test_calculate_box_area():
 
 
 @pytest.mark.asyncio
-async def test_run_qa_check_confirms_matching_annotations(sample_image):
+async def test_run_qa_check_confirms_matching_annotations(sample_image, mock_yolo26_structured):
     """
     Test that QA check correctly confirms annotations that match YOLO predictions.
     
@@ -269,7 +352,7 @@ async def test_run_qa_check_confirms_matching_annotations(sample_image):
 
 
 @pytest.mark.asyncio
-async def test_run_qa_check_different_iou_thresholds(sample_image, human_annotations):
+async def test_run_qa_check_different_iou_thresholds(sample_image, human_annotations, mock_yolo26_structured):
     """
     Test run_qa_check with different IoU thresholds.
     
@@ -293,6 +376,51 @@ async def test_run_qa_check_different_iou_thresholds(sample_image, human_annotat
     
     # Lower threshold should confirm more or equal annotations
     assert len(result_low["confirmed"]) >= len(result_high["confirmed"])
+
+
+@pytest.mark.asyncio
+async def test_run_qa_check_supports_yolo26_data_rows(sample_image, human_annotations, mock_yolo26_data_format):
+    """
+    Test run_qa_check parses YOLO26 NMS-free row-style output without crashing.
+
+    Validates that:
+    - ``boxes.data`` format is accepted
+    - Detections are converted to xywh correctly
+    - QA report still returns exactly three business lists
+    """
+    result = await qa_service.run_qa_check(
+        image_path=sample_image,
+        human_annotations=human_annotations,
+        iou_threshold=0.5,
+    )
+
+    assert isinstance(result["missed_defects"], list)
+    assert isinstance(result["size_warnings"], list)
+    assert isinstance(result["confirmed"], list)
+
+
+def test_extract_yolo26_detections_preserves_float_precision():
+    """
+    Test float precision retention for tiny boxes (STAL small-target behavior).
+
+    Validates that tiny predicted boxes are not rounded to integers before IoU.
+    """
+    tiny_result = [
+        FakeResult(
+            FakeBoxesStructured(
+                xyxy=[[10.125, 20.375, 11.375, 21.625]],
+                conf=[0.91],
+                cls=[0],
+            )
+        )
+    ]
+
+    detections = qa_service.extract_yolo26_detections(tiny_result, {0: "defect"})
+    assert len(detections) == 1
+    bbox = detections[0]["bbox"]
+    assert isinstance(bbox[0], float)
+    assert abs(bbox[2] - 1.25) < 1e-9
+    assert abs(bbox[3] - 1.25) < 1e-9
 
 
 def test_iou_calculation_comprehensive():

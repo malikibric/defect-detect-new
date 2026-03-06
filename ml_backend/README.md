@@ -37,7 +37,7 @@ Advanced AI-powered backend service providing automated label propagation, quali
     └────┬────┘    └────┬────┘    └────┬────┘   └────┬────┘
          │               │               │              │
     ┌────▼────┐    ┌────▼────┐    ┌────▼────┐   ┌────▼────┐
-    │  SAM    │    │ YOLOv8  │    │  CLIP   │   │ Stable  │
+    │  SAM    │    │ YOLO26  │    │  CLIP   │   │ Stable  │
     │  Model  │    │  Model  │    │  Model  │   │Diffusion│
     └─────────┘    └─────────┘    └─────────┘   └─────────┘
 ```
@@ -57,7 +57,7 @@ Advanced AI-powered backend service providing automated label propagation, quali
 Automatically propagate annotations across images using Meta's Segment Anything Model with few-shot learning.
 
 ### 2. **AI-Driven Quality Assurance** ✅
-Validate human annotations using YOLOv8, identifying missed defects and sizing inconsistencies.
+Validate human annotations using YOLO26, identifying missed defects and sizing inconsistencies.
 
 ### 3. **Smart Patching & Clustering** 🧩
 Extract defect patches with AI-suggested sizing and cluster by severity using CLIP embeddings.
@@ -171,7 +171,7 @@ Once running, visit:
 **Purpose**: Validate human annotations using AI to catch errors and omissions.
 
 **How it works**:
-1. Runs YOLOv8 defect detection independently
+1. Runs YOLO26 defect detection independently
 2. Compares YOLO predictions with human annotations using IoU
 3. Identifies three categories:
    - **Missed Defects**: AI found, human didn't (potential errors)
@@ -254,9 +254,9 @@ The backend requires several pre-trained models. Most download automatically via
    wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth
    ```
 
-2. **YOLOv8** (auto-downloads on first use):
-   - Pretrained: `yolov8m.pt`
-   - Or place custom defect model at: `models/defect_yolov8m.pt`
+2. **YOLO26** (auto-downloads on first use):
+    - Pretrained: `yolo26n.pt`
+    - Or set `YOLO_MODEL=models/yolo26n.pt` in `.env`
 
 3. **CLIP** (auto-downloads):
    - Model: `openai/clip-vit-base-patch32`
@@ -284,7 +284,7 @@ DEVICE=cuda  # or "cpu"
 
 # Model paths
 SAM_CHECKPOINT=models/sam_vit_h_4b8939.pth
-YOLO_MODEL=models/defect_yolov8m.pt
+YOLO_MODEL=models/yolo26n.pt
 
 # API settings
 HOST=0.0.0.0
@@ -460,7 +460,7 @@ print(f"Output directory: {result['output_directory']}")
 3. **Slow performance**:
    - Ensure GPU is detected: check `/api/health` endpoint
    - Update CUDA drivers
-   - Use smaller models (e.g., YOLOv8n instead of YOLOv8m)
+    - Use smaller models (e.g., YOLO26n for lower memory usage)
 
 4. **Import errors**:
    - Reinstall dependencies: `pip install -r requirements.txt --upgrade`

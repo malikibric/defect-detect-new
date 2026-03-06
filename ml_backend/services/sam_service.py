@@ -8,10 +8,8 @@ using Meta's Segment Anything Model with few-shot learning.
 import os
 import time
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 import numpy as np
-from PIL import Image
-import torch
 import cv2
 
 logger = logging.getLogger(__name__)

@@ -7,9 +7,8 @@ variations using Stable Diffusion inpainting.
 
 import time
 import logging
-from typing import List
 from fastapi import APIRouter, HTTPException, status
-from models.schemas import SyntheticGenerateRequest, SyntheticGenerateResponse, Annotation
+from models.schemas import SyntheticGenerateRequest, SyntheticGenerateResponse
 
 from services import synthetic_service
 

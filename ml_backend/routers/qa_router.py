@@ -2,12 +2,11 @@
 Quality Assurance router for AI-driven annotation validation.
 
 This module exposes REST API endpoints for validating human annotations
-using YOLOv8 defect detection and providing QA feedback.
+using YOLO26 defect detection and providing QA feedback.
 """
 
 import time
 import logging
-from typing import List
 from fastapi import APIRouter, HTTPException, status
 from models.schemas import QACheckRequest, QACheckResponse, Annotation
 
@@ -24,13 +23,13 @@ router = APIRouter()
     status_code=status.HTTP_200_OK,
     summary="Run QA check on annotations",
     description="""
-    Validate human annotations using AI-driven quality assurance with YOLOv8.
+    Validate human annotations using AI-driven quality assurance with YOLO26.
     
-    This endpoint runs independent defect detection using YOLOv8 and compares
+    This endpoint runs independent defect detection using YOLO26 and compares
     the results with human annotations to identify potential issues.
     
     **How it works:**
-    1. Runs YOLOv8 inference on the image independently
+    1. Runs YOLO26 inference on the image independently
     2. Compares YOLO predictions with human annotations using IoU
     3. Identifies three categories of feedback:
        - **Missed Defects**: YOLO found defects that humans didn't annotate

@@ -88,15 +88,23 @@ class ZoomableImageCanvas(QtWidgets.QLabel):
         self._redo_stack: List[np.ndarray] = []
         self._max_undo = 25
 
-    def set_state(self, state: ImageState) -> None:
+    def set_state(
+        self,
+        state: ImageState,
+        *,
+        reset_zoom: bool = True,
+        clear_history: bool = True,
+    ) -> None:
         self._state = state
         self._last_point = None
-        self._zoom_level = 1.0
+        if reset_zoom:
+            self._zoom_level = 1.0
         self._shape_start_point = None
         self._is_drawing_shape = False
         self._temp_image = None
-        self._undo_stack = []
-        self._redo_stack = []
+        if clear_history:
+            self._undo_stack = []
+            self._redo_stack = []
         self._refresh()
 
     def _push_undo_state(self) -> None:
@@ -155,6 +163,13 @@ class ZoomableImageCanvas(QtWidgets.QLabel):
         self._refresh()
 
     def reset_zoom(self) -> None:
+        parent = self.parentWidget()
+        if parent is not None:
+            target_size = parent.contentsRect().size()
+            if target_size.width() > 0 and target_size.height() > 0:
+                self.fit_to_size(target_size)
+                return
+
         self._zoom_level = 1.0
         self._refresh()
 
@@ -591,7 +606,7 @@ class DefectDetectApp(QtCore.QObject):
         zoom_toolbar = QtWidgets.QHBoxLayout()
         zoom_in_btn = QtWidgets.QPushButton("Zoom In (+)")
         zoom_out_btn = QtWidgets.QPushButton("Zoom Out (-)")
-        zoom_reset_btn = QtWidgets.QPushButton("Reset Zoom (1:1)")
+        zoom_reset_btn = QtWidgets.QPushButton("Reset Zoom (Fit)")
         zoom_label = QtWidgets.QLabel("Ctrl + Mouse Wheel to zoom")
         
         zoom_toolbar.addWidget(zoom_in_btn)
@@ -1295,7 +1310,7 @@ class DefectDetectApp(QtCore.QObject):
             return
         if self.state.annotated is None:
             self.state.annotated = self.state.original.copy()
-        self.canvas.set_state(self.state)
+        self.canvas.set_state(self.state, reset_zoom=False, clear_history=False)
 
     def _confirm_delete_annotations(self) -> None:
         if self.state.original is None:
@@ -1308,7 +1323,7 @@ class DefectDetectApp(QtCore.QObject):
         )
         if reply == QtWidgets.QMessageBox.Yes:
             self.state.annotated = self.state.original.copy()
-            self.canvas.set_state(self.state)
+            self.canvas.set_state(self.state, reset_zoom=False)
 
     def _end_session(self) -> None:
         for widget in QtWidgets.QApplication.topLevelWidgets():

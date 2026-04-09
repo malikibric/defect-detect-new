@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 # Global model registry (shared application state)
 from core.state import model_registry
+from core.geometry import calculate_bbox_similarity as _calculate_bbox_similarity
+from services.storage_service import load_cv2_image
 
 
 def load_sam_model() -> Any:
@@ -86,34 +88,7 @@ def calculate_bbox_similarity(bbox1: List[float], bbox2: List[float]) -> float:
     Returns:
         Similarity score between 0.0 and 1.0
     """
-    x1, y1, w1, h1 = bbox1
-    x2, y2, w2, h2 = bbox2
-    
-    # Calculate intersection
-    x_left = max(x1, x2)
-    y_top = max(y1, y2)
-    x_right = min(x1 + w1, x2 + w2)
-    y_bottom = min(y1 + h1, y2 + h2)
-    
-    if x_right < x_left or y_bottom < y_top:
-        intersection = 0.0
-    else:
-        intersection = (x_right - x_left) * (y_bottom - y_top)
-    
-    # Calculate union
-    area1 = w1 * h1
-    area2 = w2 * h2
-    union = area1 + area2 - intersection
-    
-    iou = intersection / union if union > 0 else 0.0
-    
-    # Calculate size similarity
-    size_ratio = min(area1, area2) / max(area1, area2) if max(area1, area2) > 0 else 0.0
-    
-    # Combine IoU and size similarity (weighted average)
-    similarity = 0.7 * iou + 0.3 * size_ratio
-    
-    return similarity
+    return _calculate_bbox_similarity(bbox1, bbox2)
 
 
 def extract_features_from_bbox(image: np.ndarray, bbox: List[float]) -> np.ndarray:
@@ -127,17 +102,17 @@ def extract_features_from_bbox(image: np.ndarray, bbox: List[float]) -> np.ndarr
     Returns:
         Feature vector representing the region
     """
-    x, y, w, h = [int(v) for v in bbox]
+    x, y, bbox_w, bbox_h = [int(v) for v in bbox]
     
     # Ensure coordinates are within image bounds
     h_img, w_img = image.shape[:2]
     x = max(0, min(x, w_img - 1))
     y = max(0, min(y, h_img - 1))
-    w = min(w, w_img - x)
-    h = min(h, h_img - y)
+    region_w = max(0, min(bbox_w, w_img - x))
+    region_h = max(0, min(bbox_h, h_img - y))
     
     # Extract region
-    region = image[y:y+h, x:x+w]
+    region = image[y:y+region_h, x:x+region_w]
     
     if region.size == 0:
         return np.zeros(128)
@@ -166,7 +141,9 @@ def extract_features_from_bbox(image: np.ndarray, bbox: List[float]) -> np.ndarr
         color_features = color_features / (color_features.sum() + 1e-6)
     
     # Combine features
-    features = np.concatenate([[edge_density, w, h, w/h if h > 0 else 1.0], color_features])
+    features = np.concatenate(
+        [[edge_density, bbox_w, bbox_h, bbox_w / bbox_h if bbox_h > 0 else 1.0], color_features]
+    )
     
     # Pad or truncate to fixed size
     if len(features) < 128:
@@ -212,18 +189,12 @@ async def propagate_annotations(
     """
     start_time = time.time()
     
-    # Validate inputs
-    if not os.path.exists(image_path):
-        raise FileNotFoundError(f"Image not found: {image_path}")
-    
     if not seed_annotations or len(seed_annotations) < 2:
         raise ValueError("At least 2 seed annotations are required")
     
     # Load image
-    logger.info(f"Loading image from {image_path}")
-    image = cv2.imread(image_path)
-    if image is None:
-        raise ValueError(f"Failed to load image: {image_path}")
+    image, display_image_path = await load_cv2_image(image_path)
+    logger.info("Loading image from %s", display_image_path)
     
     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     height, width = image.shape[:2]
@@ -264,14 +235,17 @@ async def propagate_annotations(
     proposed_annotations = []
     
     # Create a grid of points to sample
-    grid_size = 32
-    step_x = width // grid_size
-    step_y = height // grid_size
+    grid_size_x = max(1, min(32, width))
+    grid_size_y = max(1, min(32, height))
+    step_x = max(1, width // grid_size_x)
+    step_y = max(1, height // grid_size_y)
+    grid_errors = 0
+    logged_grid_errors = 0
     
-    for i in range(grid_size):
-        for j in range(grid_size):
-            point_x = i * step_x + step_x // 2
-            point_y = j * step_y + step_y // 2
+    for i in range(grid_size_x):
+        for j in range(grid_size_y):
+            point_x = min(width - 1, i * step_x + step_x // 2)
+            point_y = min(height - 1, j * step_y + step_y // 2)
             
             # Skip if point is within existing seed annotations
             is_in_seed = False
@@ -334,8 +308,18 @@ async def propagate_annotations(
                     })
                     
             except Exception as e:
-                logger.debug(f"Error processing point ({point_x}, {point_y}): {e}")
+                grid_errors += 1
+                if logged_grid_errors < 5:
+                    logger.debug("Error processing SAM point (%s, %s): %s", point_x, point_y, e)
+                    logged_grid_errors += 1
                 continue
+
+    if grid_errors:
+        logger.warning(
+            "SAM grid sampling encountered %s point-level errors while processing %s",
+            grid_errors,
+            display_image_path,
+        )
     
     processing_time = time.time() - start_time
     logger.info(f"Propagation complete: {len(proposed_annotations)} proposals in {processing_time:.2f}s")

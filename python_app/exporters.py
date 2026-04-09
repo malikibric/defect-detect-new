@@ -8,6 +8,15 @@ import json
 import cv2
 
 
+RATING_DEFINITIONS = [
+    {"rating_id": 0, "name": "No presence"},
+    {"rating_id": 1, "name": "Partial presence"},
+    {"rating_id": 2, "name": "Full presence"},
+]
+
+SURFACE_RATING_INDEX = 7
+
+
 @dataclass
 class PatchMeta:
     file_name: str
@@ -88,11 +97,7 @@ def export_json_collective(
                 )
         payload["masks"] = masks
 
-    payload["ratings"] = [
-        {"rating_id": 0, "name": "No presence"},
-        {"ocjena_id": 1, "name": "Partial presence"},
-        {"ocjena_id": 2, "name": "Full presence"},
-    ]
+    payload["ratings"] = RATING_DEFINITIONS
 
     output_path = root / "json_output.json"
     output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -158,11 +163,7 @@ def export_json_individual(
                 )
             payload["masks"] = masks
 
-        payload["ratings"] = [
-            {"ocjena_id": 0, "name": "No presence"},
-            {"ocjena_id": 1, "name": "Partial presence"},
-            {"ocjena_id": 2, "name": "Full presence"},
-        ]
+        payload["ratings"] = RATING_DEFINITIONS
 
         output_path = json_dir / f"output_{i:04d}.json"
         output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -185,9 +186,9 @@ def export_yolo(
         normalized_width = patch_width / width
         normalized_height = patch_height / height
 
-        class_id = 7
-        oi = ratings[7][i]
-        if oi != 2:
+        class_id = SURFACE_RATING_INDEX
+        surface_rating = ratings[SURFACE_RATING_INDEX][i]
+        if surface_rating != 2:
             if ratings[0][i] != 0:
                 class_id = 0
             elif ratings[1][i] != 0:
@@ -206,7 +207,7 @@ def export_yolo(
         lines.append(
             f"{class_id} {x_center:.6f} {y_center:.6f} {normalized_width:.6f} {normalized_height:.6f}"
         )
-    with output.open("a", encoding="utf-8") as f:
+    with output.open("w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
 
@@ -234,9 +235,9 @@ def export_pascal_voc(
 
     for i, coord in enumerate(coordinates, start=1):
         patch_name = f" Patch{i:04d}"
-        object_name = f"{class_names[7]}{patch_name}"
-        oi = ratings[7][i - 1]
-        if oi != 2:
+        object_name = f"{class_names[SURFACE_RATING_INDEX]}{patch_name}"
+        surface_rating = ratings[SURFACE_RATING_INDEX][i - 1]
+        if surface_rating != 2:
             if ratings[0][i - 1] != 0:
                 object_name = class_names[0]
             elif ratings[1][i - 1] != 0:

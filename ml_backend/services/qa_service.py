@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 
 # Global model registry (shared application state)
 from core.state import model_registry
+from core.geometry import calculate_iou as _calculate_iou
+from services.storage_service import load_cv2_image
 
 
 def load_yolo_model() -> Any:
@@ -206,32 +208,7 @@ def calculate_iou(box1: List[float], box2: List[float]) -> float:
         >>> print(f"IoU: {iou:.2f}")
         IoU: 0.14
     """
-    # Extract coordinates
-    x1, y1, w1, h1 = box1
-    x2, y2, w2, h2 = box2
-    
-    # Calculate coordinates of intersection rectangle
-    x_left = max(x1, x2)
-    y_top = max(y1, y2)
-    x_right = min(x1 + w1, x2 + w2)
-    y_bottom = min(y1 + h1, y2 + h2)
-    
-    # Check if there is no intersection
-    if x_right < x_left or y_bottom < y_top:
-        return 0.0
-    
-    # Calculate intersection area
-    intersection_area = (x_right - x_left) * (y_bottom - y_top)
-    
-    # Calculate union area
-    box1_area = w1 * h1
-    box2_area = w2 * h2
-    union_area = box1_area + box2_area - intersection_area
-    
-    # Calculate IoU
-    iou = intersection_area / union_area if union_area > 0 else 0.0
-    
-    return iou
+    return _calculate_iou(box1, box2)
 
 
 def calculate_box_area(bbox: List[float]) -> float:
@@ -299,12 +276,11 @@ async def run_qa_check(
     start_time = time.time()
     
     # Validate inputs
-    if not os.path.exists(image_path):
-        raise FileNotFoundError(f"Image not found: {image_path}")
+    image, display_image_path = await load_cv2_image(image_path)
     
     logger.info(
         "Running QA check on %s (human_annotations=%s, iou_threshold=%.2f)",
-        image_path,
+        display_image_path,
         len(human_annotations),
         iou_threshold,
     )
@@ -315,7 +291,7 @@ async def run_qa_check(
     # Run YOLO26 inference. Output is parsed without NMS assumptions.
     logger.info("Running YOLO26 inference...")
     try:
-        results = model(image_path, verbose=False)
+        results = model(image, verbose=False)
         yolo_detections = extract_yolo26_detections(results=results, names=getattr(model, "names", None))
 
         logger.info("YOLO26 found %d detections", len(yolo_detections))
@@ -331,36 +307,46 @@ async def run_qa_check(
     
     # Track which YOLO26 detections have been matched
     matched_yolo_indices = set()
+    matched_human_indices = set()
+    confirmed_matches: Dict[int, tuple[int, float]] = {}
     
-    # Step 1: Find confirmed annotations (human matches YOLO26)
+    # Step 1: Build globally sorted IoU matches so one human annotation cannot
+    # steal the best detection from another annotation.
+    candidate_matches: List[tuple[float, int, int]] = []
     for human_idx, human_ann in enumerate(human_annotations):
         human_bbox = human_ann["bbox"]
-        human_class = human_ann.get("class_name", "defect")
-        
-        best_iou = 0.0
-        best_yolo_idx = -1
-        
         for yolo_idx, yolo_det in enumerate(yolo_detections):
-            # Calculate IoU
             iou = calculate_iou(human_bbox, yolo_det["bbox"])
-            
-            if iou > best_iou:
-                best_iou = iou
-                best_yolo_idx = yolo_idx
-        
-        # If IoU exceeds threshold, mark as confirmed
-        if best_iou >= iou_threshold and best_yolo_idx != -1:
-            matched_yolo_indices.add(best_yolo_idx)
-            
-            confirmed.append({
-                "bbox": human_bbox,
-                "class_name": human_class,
-                "confidence": yolo_detections[best_yolo_idx]["confidence"],
-                "iou_with_yolo": best_iou,
-                "annotation_id": human_ann.get("annotation_id", f"human_{human_idx}")
-            })
+            if iou >= iou_threshold:
+                candidate_matches.append((iou, human_idx, yolo_idx))
+
+    candidate_matches.sort(key=lambda match: match[0], reverse=True)
+
+    for iou, human_idx, yolo_idx in candidate_matches:
+        if human_idx in matched_human_indices or yolo_idx in matched_yolo_indices:
+            continue
+        matched_human_indices.add(human_idx)
+        matched_yolo_indices.add(yolo_idx)
+        confirmed_matches[human_idx] = (yolo_idx, iou)
+
+    # Step 2: Materialize confirmed annotations from the chosen one-to-one matches.
+    for human_idx, human_ann in enumerate(human_annotations):
+        match = confirmed_matches.get(human_idx)
+        if match is None:
+            continue
+
+        best_yolo_idx, best_iou = match
+        human_class = human_ann.get("class_name", "defect")
+
+        confirmed.append({
+            "bbox": human_ann["bbox"],
+            "class_name": human_class,
+            "confidence": yolo_detections[best_yolo_idx]["confidence"],
+            "iou_with_yolo": best_iou,
+            "annotation_id": human_ann.get("annotation_id", f"human_{human_idx}")
+        })
     
-    # Step 2: Find missed defects (YOLO26 detected, human didn't)
+    # Step 3: Find missed defects (YOLO26 detected, human didn't)
     for yolo_idx, yolo_det in enumerate(yolo_detections):
         if yolo_idx not in matched_yolo_indices:
             # This YOLO26 detection was not matched with any human annotation
@@ -371,7 +357,7 @@ async def run_qa_check(
                 "annotation_id": f"yolo_missed_{yolo_idx}"
             })
     
-    # Step 3: Check for size warnings
+    # Step 4: Check for size warnings
     # Calculate median YOLO26 box size per class
     class_sizes: Dict[str, List[float]] = {}
     for yolo_det in yolo_detections:

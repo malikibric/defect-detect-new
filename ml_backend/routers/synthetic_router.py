@@ -7,10 +7,17 @@ variations using Stable Diffusion inpainting.
 
 import time
 import logging
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
 from models.schemas import SyntheticGenerateRequest, SyntheticGenerateResponse
 
 from services import synthetic_service
+from core.deps import get_current_active_user
+from core.asset_resolver import resolve_image_reference
+from models.db_models import User
+from models.database import get_db
+from core.path_security import safe_display_path
+from core.serialization import annotation_to_dict
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +91,9 @@ router = APIRouter()
     """
 )
 async def generate_synthetic_variations(
-    request: SyntheticGenerateRequest
+    request: SyntheticGenerateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
 ) -> SyntheticGenerateResponse:
     """
     Generate synthetic defect variations using Stable Diffusion.
@@ -103,23 +112,27 @@ async def generate_synthetic_variations(
     start_time = time.time()
     
     try:
-        logger.info(f"Generating synthetic variations for {request.image_path}")
+        resolved_image_path = await resolve_image_reference(
+            db=db,
+            owner_id=current_user.id,
+            image_path=request.image_path,
+            image_asset_id=request.image_asset_id,
+            source_uri=request.source_uri,
+        )
+
+        logger.info(
+            "User %s generating synthetic variations for %s",
+            current_user.id,
+            safe_display_path(resolved_image_path),
+        )
         logger.info(f"Requested variations: {request.num_variations}")
         logger.info(f"Lighting conditions: {request.lighting_conditions}")
         logger.info(f"Severity levels: {request.severity_levels}")
         
-        # Convert Pydantic model to dict
-        annotation_dict = {
-            "bbox": request.annotation.bbox,
-            "class_name": request.annotation.class_name,
-            "confidence": request.annotation.confidence,
-            "annotation_id": request.annotation.annotation_id
-        }
-        
         # Call service
         generated_paths = await synthetic_service.generate_synthetic_defects(
-            image_path=request.image_path,
-            annotation=annotation_dict,
+            image_path=resolved_image_path,
+            annotation=annotation_to_dict(request.annotation),
             num_variations=request.num_variations,
             lighting_conditions=request.lighting_conditions,
             severity_levels=request.severity_levels

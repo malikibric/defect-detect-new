@@ -1,0 +1,71 @@
+version: '3.8'
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: ml_backend/Dockerfile
+    container_name: defectdetect_api
+    restart: always
+    env_file:
+      - ml_backend/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:password@db:5432/defectdetect
+      DATABASE_SYNC_URL: postgresql+psycopg://postgres:password@db:5432/defectdetect
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./ml_backend:/app
+    depends_on:
+      - db
+      - redis
+
+  worker:
+    build:
+      context: .
+      dockerfile: ml_backend/Dockerfile
+    container_name: defectdetect_worker
+    restart: always
+    env_file:
+      - ml_backend/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:password@db:5432/defectdetect
+      DATABASE_SYNC_URL: postgresql+psycopg://postgres:password@db:5432/defectdetect
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    command: ["celery", "-A", "tasks.celery_app:celery_app", "worker", "--loglevel=info"]
+    volumes:
+      - ./ml_backend:/app
+    depends_on:
+      - db
+      - redis
+
+  db:
+    image: postgres:15-alpine
+    container_name: defectdetect_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: defectdetect
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: defectdetect_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  postgres_data:
+  redis_data:

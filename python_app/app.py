@@ -28,6 +28,28 @@ class DrawMode(Enum):
     ELLIPSE = "ellipse"
 
 
+class LoadMode(Enum):
+    """Modes for loading image data into the application."""
+
+    SINGLE_IMAGE = "single_image"
+    SESSION = "session"
+    IMAGE_FOLDER = "image_folder"
+
+
+MARKER_BUTTON_NAME_INDICES = [0, 1, 2, 3, 4, 6, 7, 5]
+GRADE_CLASS_NAME_INDICES = [0, 1, 2, 3, 4, 6, 7, 8, 9]
+MASK_HSV_VALUES = [
+    (101, 199, 255),
+    (21, 186, 255),
+    (0, 206, 255),
+    (77, 255, 193),
+    (15, 217, 244),
+    (130, 173, 255),
+    (162, 153, 255),
+]
+UNDO_SNAPSHOT_FORMAT = ".png"
+
+
 def _is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
 
@@ -84,9 +106,22 @@ class ZoomableImageCanvas(QtWidgets.QLabel):
         self._shape_start_point: Optional[tuple[int, int]] = None
         self._is_drawing_shape = False
         self._temp_image: Optional[np.ndarray] = None
-        self._undo_stack: List[np.ndarray] = []
-        self._redo_stack: List[np.ndarray] = []
+        self._undo_stack: List[bytes] = []
+        self._redo_stack: List[bytes] = []
         self._max_undo = 25
+
+    def _snapshot_image(self, image: np.ndarray) -> bytes:
+        success, encoded = cv2.imencode(UNDO_SNAPSHOT_FORMAT, image)
+        if not success:
+            raise ValueError("Failed to snapshot image state")
+        return encoded.tobytes()
+
+    def _restore_snapshot(self, snapshot: bytes) -> np.ndarray:
+        buffer = np.frombuffer(snapshot, dtype=np.uint8)
+        restored = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
+        if restored is None:
+            raise ValueError("Failed to restore image snapshot")
+        return restored
 
     def set_state(
         self,
@@ -110,7 +145,7 @@ class ZoomableImageCanvas(QtWidgets.QLabel):
     def _push_undo_state(self) -> None:
         if not self._state or self._state.annotated is None:
             return
-        self._undo_stack.append(self._state.annotated.copy())
+        self._undo_stack.append(self._snapshot_image(self._state.annotated))
         self._redo_stack.clear()
         if len(self._undo_stack) > self._max_undo:
             self._undo_stack.pop(0)
@@ -118,19 +153,19 @@ class ZoomableImageCanvas(QtWidgets.QLabel):
     def undo_last_action(self) -> None:
         if not self._state or self._state.annotated is None or not self._undo_stack:
             return
-        self._redo_stack.append(self._state.annotated.copy())
+        self._redo_stack.append(self._snapshot_image(self._state.annotated))
         if len(self._redo_stack) > self._max_undo:
             self._redo_stack.pop(0)
-        self._state.annotated = self._undo_stack.pop()
+        self._state.annotated = self._restore_snapshot(self._undo_stack.pop())
         self._refresh()
 
     def redo_last_action(self) -> None:
         if not self._state or self._state.annotated is None or not self._redo_stack:
             return
-        self._undo_stack.append(self._state.annotated.copy())
+        self._undo_stack.append(self._snapshot_image(self._state.annotated))
         if len(self._undo_stack) > self._max_undo:
             self._undo_stack.pop(0)
-        self._state.annotated = self._redo_stack.pop()
+        self._state.annotated = self._restore_snapshot(self._redo_stack.pop())
         self._refresh()
 
     def set_brush(self, color: tuple[int, int, int], size: int, draw_mode: bool) -> None:
@@ -571,9 +606,9 @@ class DefectDetectApp(QtCore.QObject):
         layout.addWidget(load_session_btn)
         layout.addStretch()
 
-        load_image_btn.clicked.connect(lambda: self._on_load_action(1))
-        load_multi_btn.clicked.connect(lambda: self._on_load_action(3))
-        load_session_btn.clicked.connect(lambda: self._on_load_action(2))
+        load_image_btn.clicked.connect(lambda: self._on_load_action(LoadMode.SINGLE_IMAGE))
+        load_multi_btn.clicked.connect(lambda: self._on_load_action(LoadMode.IMAGE_FOLDER))
+        load_session_btn.clicked.connect(lambda: self._on_load_action(LoadMode.SESSION))
 
         self.tab_widget.addTab(home_widget, "Home")
 
@@ -678,17 +713,19 @@ class DefectDetectApp(QtCore.QObject):
 
         marker_buttons_layout = QtWidgets.QHBoxLayout()
         self.marker_buttons = []
-        self._add_marker_button(marker_buttons_layout, "1.png", self.cfg.names[0], 1)
-        self._add_marker_button(marker_buttons_layout, "2.png", self.cfg.names[1], 2)
-        self._add_marker_button(marker_buttons_layout, "3.png", self.cfg.names[2], 3)
-        self._add_marker_button(marker_buttons_layout, "4.png", self.cfg.names[3], 4)
-        self._add_marker_button(marker_buttons_layout, "8.png", self.cfg.names[4], 8)
+        primary_marker_labels = self._cfg_names([0, 1, 2, 3, 4])
+        self._add_marker_button(marker_buttons_layout, "1.png", primary_marker_labels[0], 1)
+        self._add_marker_button(marker_buttons_layout, "2.png", primary_marker_labels[1], 2)
+        self._add_marker_button(marker_buttons_layout, "3.png", primary_marker_labels[2], 3)
+        self._add_marker_button(marker_buttons_layout, "4.png", primary_marker_labels[3], 4)
+        self._add_marker_button(marker_buttons_layout, "8.png", primary_marker_labels[4], 8)
         marker_layout.addLayout(marker_buttons_layout)
 
         marker_buttons_layout2 = QtWidgets.QHBoxLayout()
-        self._add_marker_button(marker_buttons_layout2, "5.png", self.cfg.names[6], 5, text=True)
-        self._add_marker_button(marker_buttons_layout2, "6.png", self.cfg.names[7], 6, text=True)
-        self._add_marker_button(marker_buttons_layout2, "7.png", self.cfg.names[5], 7, text=True)
+        secondary_marker_labels = self._cfg_names([6, 7, 5])
+        self._add_marker_button(marker_buttons_layout2, "5.png", secondary_marker_labels[0], 5, text=True)
+        self._add_marker_button(marker_buttons_layout2, "6.png", secondary_marker_labels[1], 6, text=True)
+        self._add_marker_button(marker_buttons_layout2, "7.png", secondary_marker_labels[2], 7, text=True)
         marker_layout.addLayout(marker_buttons_layout2)
 
         thickness_layout = QtWidgets.QHBoxLayout()
@@ -1010,17 +1047,7 @@ class DefectDetectApp(QtCore.QObject):
 
         self.rating_checkboxes: List[List[QtWidgets.QCheckBox]] = []
         self.grade_labels: List[QtWidgets.QLabel] = []
-        class_labels = [
-            self.cfg.names[0],
-            self.cfg.names[1],
-            self.cfg.names[2],
-            self.cfg.names[3],
-            self.cfg.names[4],
-            self.cfg.names[6],
-            self.cfg.names[7],
-            self.cfg.names[8],
-            self.cfg.names[9],
-        ]
+        class_labels = self._grade_class_names()
         for label in class_labels:
             row = QtWidgets.QHBoxLayout()
             widget = QtWidgets.QWidget()
@@ -1055,6 +1082,29 @@ class DefectDetectApp(QtCore.QObject):
         row.addWidget(no)
         layout.addLayout(row)
         return widget
+
+    def _cfg_names(self, indices: List[int]) -> List[str]:
+        return [self.cfg.names[index] for index in indices]
+
+    def _grade_class_names(self) -> List[str]:
+        return self._cfg_names(GRADE_CLASS_NAME_INDICES)
+
+    def _marker_button_labels(self) -> List[str]:
+        return self._cfg_names(MARKER_BUTTON_NAME_INDICES)
+
+    def _parse_int_field(
+        self,
+        widget: QtWidgets.QLineEdit,
+        current_value: int,
+        field_name: str,
+    ) -> int:
+        raw_value = widget.text().strip()
+        if not raw_value:
+            return current_value
+        try:
+            return int(float(raw_value))
+        except ValueError as exc:
+            raise ValueError(f"{field_name} must be a valid number") from exc
 
     def _sync_settings_ui(self) -> None:
         for edit, name in zip(self.name_edits, self.cfg.names):
@@ -1163,8 +1213,8 @@ class DefectDetectApp(QtCore.QObject):
         layout.addWidget(btn)
         self.marker_buttons.append(btn)
 
-    def _on_load_action(self, mode: int) -> None:
-        if mode == 1:
+    def _on_load_action(self, mode: LoadMode) -> None:
+        if mode == LoadMode.SINGLE_IMAGE:
             file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
                 self.main_window,
                 "Choose image",
@@ -1176,7 +1226,7 @@ class DefectDetectApp(QtCore.QObject):
             self.image_states = {}
             self._load_image(Path(file_path))
             self.file_list = []
-        elif mode == 2:
+        elif mode == LoadMode.SESSION:
             folder = QtWidgets.QFileDialog.getExistingDirectory(
                 self.main_window, "Load session", ""
             )
@@ -1185,7 +1235,7 @@ class DefectDetectApp(QtCore.QObject):
             self.image_states = {}
             self._load_session(Path(folder))
             self.file_list = []
-        elif mode == 3:
+        elif mode == LoadMode.IMAGE_FOLDER:
             folder = QtWidgets.QFileDialog.getExistingDirectory(
                 self.main_window, "Choose folder", ""
             )
@@ -1338,37 +1388,52 @@ class DefectDetectApp(QtCore.QObject):
         self._update_canvas_brush()
 
     def _save_settings(self) -> None:
-        self.cfg.marker_thickness = int(self.thickness_combo.currentText())
-        self.cfg.rating1_tolerance = int(self.tolerance_edit.text() or self.cfg.rating1_tolerance)
-        for idx, edit in enumerate(self.name_edits):
-            self.cfg.names[idx] = edit.text()
-        self.cfg.patch_width = int(float(self.patch_width_edit.text() or self.cfg.patch_width))
-        self.cfg.patch_height = int(float(self.patch_height_edit.text() or self.cfg.patch_height))
-        self.cfg.patch_stride_x = int(float(self.patch_stride_x_edit.text() or self.cfg.patch_stride_x))
-        self.cfg.patch_stride_y = int(float(self.patch_stride_y_edit.text() or self.cfg.patch_stride_y))
+        try:
+            self.cfg.marker_thickness = int(self.thickness_combo.currentText())
+            self.cfg.rating1_tolerance = self._parse_int_field(
+                self.tolerance_edit,
+                self.cfg.rating1_tolerance,
+                "Tolerance",
+            )
+            for idx, edit in enumerate(self.name_edits):
+                self.cfg.names[idx] = edit.text()
+            self.cfg.patch_width = self._parse_int_field(
+                self.patch_width_edit,
+                self.cfg.patch_width,
+                "Patch width",
+            )
+            self.cfg.patch_height = self._parse_int_field(
+                self.patch_height_edit,
+                self.cfg.patch_height,
+                "Patch height",
+            )
+            self.cfg.patch_stride_x = self._parse_int_field(
+                self.patch_stride_x_edit,
+                self.cfg.patch_stride_x,
+                "Horizontal stride",
+            )
+            self.cfg.patch_stride_y = self._parse_int_field(
+                self.patch_stride_y_edit,
+                self.cfg.patch_stride_y,
+                "Vertical stride",
+            )
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self.main_window, "Invalid settings", str(exc))
+            return
+
         save_config(self.config_path, self.cfg)
         self._refresh_marker_labels()
         self._sync_patch_dim_edits()
         self._update_canvas_brush()
 
     def _refresh_marker_labels(self) -> None:
-        labels = [self.cfg.names[0], self.cfg.names[1], self.cfg.names[2], self.cfg.names[3], self.cfg.names[4], self.cfg.names[6], self.cfg.names[7], self.cfg.names[5]]
+        labels = self._marker_button_labels()
         for btn, label in zip(self.marker_buttons, labels):
             btn.setToolTip(label)
             if btn.text():
                 btn.setText(label)
         if hasattr(self, "grade_labels"):
-            grade_names = [
-                self.cfg.names[0],
-                self.cfg.names[1],
-                self.cfg.names[2],
-                self.cfg.names[3],
-                self.cfg.names[4],
-                self.cfg.names[6],
-                self.cfg.names[7],
-                self.cfg.names[8],
-                self.cfg.names[9],
-            ]
+            grade_names = self._grade_class_names()
             for label_widget, name in zip(self.grade_labels, grade_names):
                 label_widget.setText(f"Choose ratings for {name}:")
 
@@ -1412,17 +1477,7 @@ class DefectDetectApp(QtCore.QObject):
             return
         self._prepare_masks()
         self.export_mask_zoom = 1.0
-        titles = [
-            self.cfg.names[0],
-            self.cfg.names[1],
-            self.cfg.names[2],
-            self.cfg.names[3],
-            self.cfg.names[4],
-            self.cfg.names[6],
-            self.cfg.names[7],
-            self.cfg.names[8],
-            self.cfg.names[9],
-        ]
+        titles = self._grade_class_names()
         self.export_mask_items = [(title, mask) for title, mask in zip(titles, self.masks)]
         self.export_mask_index = 0
         self._update_export_mask_preview()
@@ -1537,16 +1592,7 @@ class DefectDetectApp(QtCore.QObject):
             return
         hsv = cv2.cvtColor(self.state.annotated, cv2.COLOR_BGR2HSV)
         masks = []
-        hsv_values = [
-            (101, 199, 255),
-            (21, 186, 255),
-            (0, 206, 255),
-            (77, 255, 193),
-            (15, 217, 244),
-            (130, 173, 255),
-            (162, 153, 255),
-        ]
-        for hsv_value in hsv_values:
+        for hsv_value in MASK_HSV_VALUES:
             lower = np.array(hsv_value, dtype=np.uint8)
             upper = np.array(hsv_value, dtype=np.uint8)
             mask = cv2.inRange(hsv, lower, upper)
@@ -1554,7 +1600,7 @@ class DefectDetectApp(QtCore.QObject):
             # are exported as complete selected areas.
             mask = self._fill_enclosed_regions(mask)
             masks.append(mask)
-        combined = masks[0] | masks[1] | masks[2] | masks[3] | masks[4] | masks[5] | masks[6]
+        combined = np.bitwise_or.reduce(masks[:7])
         correct = cv2.bitwise_not(combined)
         masks.append(correct)
         leather = cv2.bitwise_not(masks[5] | masks[6])
@@ -1823,17 +1869,7 @@ class DefectDetectApp(QtCore.QObject):
         cv2.imwrite(str(result_dir / "Original" / f"{image_name}.bmp"), self.state.original)
 
         self._prepare_masks()
-        mask_names = [
-            self.cfg.names[0],
-            self.cfg.names[1],
-            self.cfg.names[2],
-            self.cfg.names[3],
-            self.cfg.names[4],
-            self.cfg.names[6],
-            self.cfg.names[7],
-            self.cfg.names[8],
-            self.cfg.names[9],
-        ]
+        mask_names = self._grade_class_names()
         for name, mask in zip(mask_names, self.masks):
             filename = f"{name}.bmp"
             cv2.imwrite(str(result_dir / "Masks" / filename), mask)
@@ -1849,23 +1885,10 @@ class DefectDetectApp(QtCore.QObject):
         return "image"
 
     def _patch_names(self) -> List[str]:
-        return [
-            "Original",
-            f"Mask {self.cfg.names[0]}",
-            f"Mask {self.cfg.names[1]}",
-            f"Mask {self.cfg.names[2]}",
-            f"Mask {self.cfg.names[3]}",
-            f"Mask {self.cfg.names[4]}",
-            f"Mask {self.cfg.names[6]}",
-            f"Mask {self.cfg.names[7]}",
-            f"Mask {self.cfg.names[8]}",
-            f"Mask {self.cfg.names[9]}",
-        ]
+        return ["Original", *[f"Mask {name}" for name in self._grade_class_names()]]
 
     def _class_names(self) -> List[str]:
-        names = self.cfg.names.copy()
-        del names[5]
-        return names
+        return self._grade_class_names()
 
     def _clear_exports(self) -> None:
         self.masks = []

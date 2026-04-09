@@ -7,10 +7,17 @@ using YOLO26 defect detection and providing QA feedback.
 
 import time
 import logging
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
 from models.schemas import QACheckRequest, QACheckResponse, Annotation
 
 from services import qa_service
+from core.deps import get_current_active_user
+from core.asset_resolver import resolve_image_reference
+from models.db_models import User
+from models.database import get_db
+from core.path_security import safe_display_path
+from core.serialization import annotations_from_dicts, annotations_to_dicts
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +68,11 @@ router = APIRouter()
     - High confirmed rate → Good annotation quality
     """
 )
-async def check_annotations(request: QACheckRequest) -> QACheckResponse:
+async def check_annotations(
+    request: QACheckRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> QACheckResponse:
     """
     Run AI-driven QA check on human annotations.
     
@@ -78,47 +89,30 @@ async def check_annotations(request: QACheckRequest) -> QACheckResponse:
     start_time = time.time()
     
     try:
-        logger.info(f"Running QA check for {request.image_path}")
+        resolved_image_path = await resolve_image_reference(
+            db=db,
+            owner_id=current_user.id,
+            image_path=request.image_path,
+            image_asset_id=request.image_asset_id,
+            source_uri=request.source_uri,
+        )
+
+        logger.info(
+            "User %s running QA check for %s",
+            current_user.id,
+            safe_display_path(resolved_image_path),
+        )
         logger.info(f"Human annotations: {len(request.human_annotations)}, IoU threshold: {request.iou_threshold}")
-        
-        # Convert Pydantic models to dicts
-        human_annotations_dict = [
-            {
-                "bbox": ann.bbox,
-                "class_name": ann.class_name,
-                "confidence": ann.confidence,
-                "annotation_id": ann.annotation_id
-            }
-            for ann in request.human_annotations
-        ]
         
         # Call service
         qa_result = await qa_service.run_qa_check(
-            image_path=request.image_path,
-            human_annotations=human_annotations_dict,
+            image_path=resolved_image_path,
+            human_annotations=annotations_to_dicts(request.human_annotations),
             iou_threshold=request.iou_threshold
         )
         
-        # Convert results to Pydantic models
-        missed_defects = [
-            Annotation(
-                bbox=det["bbox"],
-                class_name=det["class_name"],
-                confidence=det.get("confidence"),
-                annotation_id=det.get("annotation_id")
-            )
-            for det in qa_result["missed_defects"]
-        ]
-        
-        confirmed = [
-            Annotation(
-                bbox=ann["bbox"],
-                class_name=ann["class_name"],
-                confidence=ann.get("confidence"),
-                annotation_id=ann.get("annotation_id")
-            )
-            for ann in qa_result["confirmed"]
-        ]
+        missed_defects = annotations_from_dicts(qa_result["missed_defects"])
+        confirmed = annotations_from_dicts(qa_result["confirmed"])
         
         processing_time = time.time() - start_time
         

@@ -6,7 +6,9 @@ including annotation formats, QA reports, patch metadata, and synthetic data req
 """
 
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from core.path_security import normalize_request_image_path
 
 
 class BoundingBox(BaseModel):
@@ -32,6 +34,8 @@ class Annotation(BaseModel):
         """Ensure bbox has exactly 4 values [x, y, w, h]."""
         if len(v) != 4:
             raise ValueError("Bounding box must have exactly 4 values [x, y, w, h]")
+        if v[0] < 0 or v[1] < 0:
+            raise ValueError("Bounding box x and y coordinates must be non-negative")
         if v[2] <= 0 or v[3] <= 0:
             raise ValueError("Width and height must be positive")
         return v
@@ -40,7 +44,9 @@ class Annotation(BaseModel):
 class SAMPropagateRequest(BaseModel):
     """Request schema for SAM label propagation."""
     
-    image_path: str = Field(..., description="Path to the input image file")
+    image_path: Optional[str] = Field(None, description="Path to the input image file")
+    image_asset_id: Optional[int] = Field(None, description="Registered image asset ID")
+    source_uri: Optional[str] = Field(None, description="Storage URI for the input image")
     seed_annotations: List[Annotation] = Field(
         ..., 
         min_items=2, 
@@ -54,6 +60,19 @@ class SAMPropagateRequest(BaseModel):
         description="Minimum similarity score for proposing new annotations"
     )
 
+    @field_validator("image_path")
+    @classmethod
+    def validate_image_path(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        return normalize_request_image_path(value)
+
+    @model_validator(mode="after")
+    def validate_image_reference(self):
+        if not any([self.image_path, self.image_asset_id, self.source_uri]):
+            raise ValueError("Provide one of image_path, image_asset_id, or source_uri")
+        return self
+
 
 class SAMPropagateResponse(BaseModel):
     """Response schema for SAM label propagation."""
@@ -66,7 +85,9 @@ class SAMPropagateResponse(BaseModel):
 class QACheckRequest(BaseModel):
     """Request schema for QA validation."""
     
-    image_path: str = Field(..., description="Path to the input image file")
+    image_path: Optional[str] = Field(None, description="Path to the input image file")
+    image_asset_id: Optional[int] = Field(None, description="Registered image asset ID")
+    source_uri: Optional[str] = Field(None, description="Storage URI for the input image")
     human_annotations: List[Annotation] = Field(..., description="Human-provided annotations to validate")
     iou_threshold: float = Field(
         default=0.5,
@@ -74,6 +95,19 @@ class QACheckRequest(BaseModel):
         le=1.0,
         description="IoU threshold for matching predictions"
     )
+
+    @field_validator("image_path")
+    @classmethod
+    def validate_image_path(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        return normalize_request_image_path(value)
+
+    @model_validator(mode="after")
+    def validate_image_reference(self):
+        if not any([self.image_path, self.image_asset_id, self.source_uri]):
+            raise ValueError("Provide one of image_path, image_asset_id, or source_uri")
+        return self
 
 
 class QACheckResponse(BaseModel):
@@ -99,7 +133,9 @@ class QACheckResponse(BaseModel):
 class PatchExtractRequest(BaseModel):
     """Request schema for patch extraction."""
     
-    image_path: str = Field(..., description="Path to the input image file")
+    image_path: Optional[str] = Field(None, description="Path to the input image file")
+    image_asset_id: Optional[int] = Field(None, description="Registered image asset ID")
+    source_uri: Optional[str] = Field(None, description="Storage URI for the input image")
     annotations: List[Annotation] = Field(..., description="Annotations to extract patches from")
     patch_size: Optional[int] = Field(
         None,
@@ -113,6 +149,19 @@ class PatchExtractRequest(BaseModel):
         le=3.0,
         description="Padding multiplier for patch extraction"
     )
+
+    @field_validator("image_path")
+    @classmethod
+    def validate_image_path(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        return normalize_request_image_path(value)
+
+    @model_validator(mode="after")
+    def validate_image_reference(self):
+        if not any([self.image_path, self.image_asset_id, self.source_uri]):
+            raise ValueError("Provide one of image_path, image_asset_id, or source_uri")
+        return self
 
 
 class PatchMetadata(BaseModel):
@@ -152,7 +201,9 @@ class ClusterPatchesResponse(BaseModel):
 class SyntheticGenerateRequest(BaseModel):
     """Request schema for synthetic defect generation."""
     
-    image_path: str = Field(..., description="Path to the source image")
+    image_path: Optional[str] = Field(None, description="Path to the source image")
+    image_asset_id: Optional[int] = Field(None, description="Registered image asset ID")
+    source_uri: Optional[str] = Field(None, description="Storage URI for the source image")
     annotation: Annotation = Field(..., description="Defect annotation to vary")
     num_variations: int = Field(
         default=10,
@@ -169,6 +220,19 @@ class SyntheticGenerateRequest(BaseModel):
         description="Defect severity levels"
     )
 
+    @field_validator("image_path")
+    @classmethod
+    def validate_image_path(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        return normalize_request_image_path(value)
+
+    @model_validator(mode="after")
+    def validate_image_reference(self):
+        if not any([self.image_path, self.image_asset_id, self.source_uri]):
+            raise ValueError("Provide one of image_path, image_asset_id, or source_uri")
+        return self
+
 
 class SyntheticGenerateResponse(BaseModel):
     """Response schema for synthetic defect generation."""
@@ -177,3 +241,108 @@ class SyntheticGenerateResponse(BaseModel):
     total_generated: int = Field(..., description="Total images generated")
     output_directory: str = Field(..., description="Directory containing generated images")
     processing_time_seconds: float = Field(..., description="Time taken for generation")
+
+
+class UserSignupRequest(BaseModel):
+    """Request schema for user registration."""
+
+    email: str = Field(..., description="Unique user email")
+    password: str = Field(..., min_length=8, description="Plaintext password")
+
+
+class UserPublic(BaseModel):
+    """Public user representation for API responses."""
+
+    id: int
+    email: str
+    is_active: bool
+    is_superuser: bool
+
+
+class TokenResponse(BaseModel):
+    """JWT access token response model."""
+
+    access_token: str
+    token_type: str = "bearer"
+
+
+class JobCreateRequest(BaseModel):
+    """Request schema for creating an async processing job."""
+
+    job_type: str = Field(..., description="Type of job, e.g. synthetic.generate")
+    image_path: Optional[str] = Field(None, description="Input image path (legacy local mode)")
+    image_asset_id: Optional[int] = Field(None, description="Registered image asset ID")
+    source_uri: Optional[str] = Field(None, description="Storage URI for input image")
+    payload: Dict[str, Any] = Field(default_factory=dict, description="Task-specific payload")
+    webhook_url: Optional[str] = Field(default=None, description="Optional callback URL")
+
+    @field_validator("image_path")
+    @classmethod
+    def validate_image_path_for_job(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        return normalize_request_image_path(value)
+
+    @model_validator(mode="after")
+    def validate_image_reference(self):
+        if not any([self.image_path, self.image_asset_id, self.source_uri]):
+            raise ValueError("Provide one of image_path, image_asset_id, or source_uri")
+        return self
+
+
+class JobResponse(BaseModel):
+    """Response schema for submitted or fetched jobs."""
+
+    id: int
+    type: str
+    status: str
+    celery_task_id: Optional[str] = None
+    created_at: str
+    updated_at: str
+    error_message: Optional[str] = None
+
+
+class FileUploadResponse(BaseModel):
+    """Response schema for uploaded files tracked as image assets."""
+
+    id: int
+    source_uri: str
+    checksum: Optional[str] = None
+    content_type: Optional[str] = None
+    original_filename: Optional[str] = None
+    project_id: Optional[int] = None
+    created_at: str
+
+
+class ProjectCreateRequest(BaseModel):
+    """Request schema for creating a project/workspace."""
+
+    name: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = None
+
+
+class ProjectResponse(BaseModel):
+    """Project response schema."""
+
+    id: int
+    name: str
+    description: Optional[str] = None
+    owner_id: int
+    created_at: str
+
+
+class ArtifactResponse(BaseModel):
+    """Generated artifact linked to a background job."""
+
+    id: int
+    artifact_type: str
+    uri: str
+    metadata_json: Optional[str] = None
+    created_at: str
+
+
+class JobDetailResponse(JobResponse):
+    """Extended job response with result payload and artifacts."""
+
+    result_json: Optional[Dict[str, Any]] = None
+    artifacts: List[ArtifactResponse] = Field(default_factory=list)

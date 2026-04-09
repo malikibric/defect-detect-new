@@ -7,10 +7,17 @@ to propagate annotations across images with few-shot learning.
 
 import time
 import logging
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
 from models.schemas import SAMPropagateRequest, SAMPropagateResponse, Annotation
 
 from services import sam_service
+from core.deps import get_current_active_user
+from core.asset_resolver import resolve_image_reference
+from models.db_models import User
+from models.database import get_db
+from core.path_security import safe_display_path
+from core.serialization import annotations_from_dicts, annotations_to_dicts
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +58,11 @@ router = APIRouter()
     - `processing_time_seconds`: Time taken for processing
     """
 )
-async def propagate_annotations(request: SAMPropagateRequest) -> SAMPropagateResponse:
+async def propagate_annotations(
+    request: SAMPropagateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> SAMPropagateResponse:
     """
     Propagate annotations using SAM with few-shot learning.
     
@@ -69,37 +80,29 @@ async def propagate_annotations(request: SAMPropagateRequest) -> SAMPropagateRes
     start_time = time.time()
     
     try:
-        logger.info(f"Propagating annotations for {request.image_path}")
+        resolved_image_path = await resolve_image_reference(
+            db=db,
+            owner_id=current_user.id,
+            image_path=request.image_path,
+            image_asset_id=request.image_asset_id,
+            source_uri=request.source_uri,
+        )
+
+        logger.info(
+            "User %s propagating annotations for %s",
+            current_user.id,
+            safe_display_path(resolved_image_path),
+        )
         logger.info(f"Seed annotations: {len(request.seed_annotations)}, threshold: {request.similarity_threshold}")
-        
-        # Convert Pydantic models to dicts
-        seed_annotations_dict = [
-            {
-                "bbox": ann.bbox,
-                "class_name": ann.class_name,
-                "confidence": ann.confidence,
-                "annotation_id": ann.annotation_id
-            }
-            for ann in request.seed_annotations
-        ]
         
         # Call service
         proposed = await sam_service.propagate_annotations(
-            image_path=request.image_path,
-            seed_annotations=seed_annotations_dict,
+            image_path=resolved_image_path,
+            seed_annotations=annotations_to_dicts(request.seed_annotations),
             similarity_threshold=request.similarity_threshold
         )
         
-        # Convert to Pydantic models
-        proposed_annotations = [
-            Annotation(
-                bbox=prop["bbox"],
-                class_name=prop["class_name"],
-                confidence=prop.get("confidence"),
-                annotation_id=prop.get("annotation_id")
-            )
-            for prop in proposed
-        ]
+        proposed_annotations = annotations_from_dicts(proposed)
         
         processing_time = time.time() - start_time
         

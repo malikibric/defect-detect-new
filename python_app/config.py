@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from pathlib import Path
 from typing import Dict, List
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -84,7 +88,7 @@ def load_config(path: Path) -> AppConfig:
             try:
                 setattr(cfg, canonical, int(float(value)))
             except ValueError:
-                pass
+                logger.warning("Ignoring invalid config value for %s: %r", key, value)
     return cfg
 
 

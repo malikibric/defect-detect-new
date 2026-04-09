@@ -4,6 +4,7 @@ Advanced AI-powered backend service providing automated label propagation, quali
 
 ## 📋 Table of Contents
 
+- [Web Backend Foundation](#web-backend-foundation)
 - [Architecture Overview](#architecture-overview)
 - [Features](#features)
 - [Installation](#installation)
@@ -13,6 +14,60 @@ Advanced AI-powered backend service providing automated label propagation, quali
 - [Model Downloads](#model-downloads)
 - [Configuration](#configuration)
 - [Testing](#testing)
+
+---
+
+## 🌐 Web Backend Foundation
+
+The backend is now structured for browser-based integration (frontend can be added later):
+
+- **Versioned API** under `/api/v1`
+- **Authentication** with JWT (`/api/v1/auth/*`)
+- **Projects and assets** for multi-user data isolation
+- **Image references** via `image_asset_id`, `source_uri`, or legacy `image_path`
+- **Background jobs** via Celery + Redis
+- **Realtime updates** via WebSocket channels per job
+- **Webhook callbacks** for external orchestration
+- **Persistence** with PostgreSQL (SQLAlchemy + Alembic)
+
+### New Core Endpoints
+
+- `POST /api/v1/auth/signup`
+- `POST /api/v1/auth/login/access-token`
+- `GET /api/v1/auth/me`
+- `POST /api/v1/projects/`
+- `GET /api/v1/projects/`
+- `POST /api/v1/files/upload`
+- `GET /api/v1/files/`
+- `POST /api/v1/jobs/`
+- `GET /api/v1/jobs/`
+- `GET /api/v1/jobs/{job_id}`
+- `POST /api/v1/jobs/{job_id}/cancel`
+- `WS /api/v1/ws/jobs/{job_id}?token=<JWT>`
+
+### Local Infrastructure (Docker Compose)
+
+From repository root:
+
+1. Start services (`api`, `worker`, `db`, `redis`) using Docker Compose.
+2. Backend docs: `http://localhost:8000/api/v1/docs`
+3. Health endpoints:
+    - `/api/v1/health`
+    - `/api/v1/health/liveness`
+    - `/api/v1/health/readiness`
+    - `/api/v1/metrics`
+
+### Database Migrations
+
+- Alembic config: `ml_backend/alembic.ini`
+- Migration env: `ml_backend/alembic/env.py`
+- Initial migration: `ml_backend/alembic/versions/20260317_0001_initial_web_backend.py`
+
+Run migrations from `ml_backend`:
+
+```bash
+alembic upgrade head
+```
 
 ---
 

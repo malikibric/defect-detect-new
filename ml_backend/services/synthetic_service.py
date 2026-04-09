@@ -19,6 +19,11 @@ logger = logging.getLogger(__name__)
 
 # Global model registry (shared application state)
 from core.state import model_registry
+from core.path_security import (
+    resolve_allowed_output_dir,
+    safe_display_path,
+)
+from services.storage_service import image_reference_stem, load_cv2_image, load_pil_image_rgb
 
 
 def load_diffusion_pipeline() -> Any:
@@ -222,8 +227,8 @@ async def generate_synthetic_defects(
     start_time = time.time()
     
     # Validate inputs
-    if not os.path.exists(image_path):
-        raise FileNotFoundError(f"Image not found: {image_path}")
+    image, display_image_path = await load_pil_image_rgb(image_path)
+    resolved_output_dir = resolve_allowed_output_dir(output_dir)
     
     if not annotation or "bbox" not in annotation:
         raise ValueError("Invalid annotation: must contain 'bbox' field")
@@ -238,16 +243,14 @@ async def generate_synthetic_defects(
     logger.info(
         "Generating %s synthetic variations from %s (lighting=%s, severity=%s)",
         num_variations,
-        image_path,
+        display_image_path,
         lighting_conditions,
         severity_levels,
     )
     
     # Create output directory
-    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(resolved_output_dir, exist_ok=True)
     
-    # Load image
-    image = Image.open(image_path).convert("RGB")
     image_array = np.array(image)
     img_height, img_width = image_array.shape[:2]
     
@@ -285,12 +288,12 @@ async def generate_synthetic_defects(
         logger.error("Failed to load diffusion pipeline: %s", e)
         # Fallback: create simple variations using traditional augmentation
         return await generate_synthetic_defects_fallback(
-            image_path, annotation, num_variations, output_dir
+            image_path, annotation, num_variations, str(resolved_output_dir)
         )
     
     # Generate variations
     generated_paths = []
-    base_filename = Path(image_path).stem
+    base_filename = image_reference_stem(image_path)
     
     negative_prompt = build_negative_prompt()
     
@@ -325,10 +328,10 @@ async def generate_synthetic_defects(
             
             # Save generated image
             output_filename = f"{base_filename}_synthetic_{i:03d}_{lighting}_{severity}.png"
-            output_path = os.path.join(output_dir, output_filename)
+            output_path = resolved_output_dir / output_filename
             
             generated_image.save(output_path)
-            generated_paths.append(output_path)
+            generated_paths.append(str(output_path))
             
             logger.debug("Saved variation to %s", output_path)
             
@@ -341,7 +344,7 @@ async def generate_synthetic_defects(
         "Generated %s variations in %.2fs (output_dir=%s)",
         len(generated_paths),
         processing_time,
-        output_dir,
+        safe_display_path(resolved_output_dir),
     )
     
     return generated_paths
@@ -369,16 +372,17 @@ async def generate_synthetic_defects_fallback(
         List of generated image paths
     """
     logger.info("Using fallback augmentation method")
+    resolved_output_dir = resolve_allowed_output_dir(output_dir)
     
     # Load image
-    image = cv2.imread(image_path)
+    image, display_image_path = await load_cv2_image(image_path)
     if image is None:
-        raise ValueError(f"Failed to load image: {image_path}")
+        raise ValueError(f"Failed to load image: {display_image_path}")
     
     generated_paths = []
-    base_filename = Path(image_path).stem
+    base_filename = image_reference_stem(image_path)
     
-    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(resolved_output_dir, exist_ok=True)
     
     for i in range(num_variations):
         # Create variation using traditional augmentation
@@ -409,10 +413,10 @@ async def generate_synthetic_defects_fallback(
         
         # Save variation
         output_filename = f"{base_filename}_synthetic_{i:03d}_fallback.png"
-        output_path = os.path.join(output_dir, output_filename)
+        output_path = resolved_output_dir / output_filename
         
-        cv2.imwrite(output_path, augmented)
-        generated_paths.append(output_path)
+        cv2.imwrite(str(output_path), augmented)
+        generated_paths.append(str(output_path))
     
     logger.info("Generated %s fallback variations", len(generated_paths))
     return generated_paths

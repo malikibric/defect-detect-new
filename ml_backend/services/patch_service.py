@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 # Global model registry (shared application state)
 from core.state import model_registry
+from services.storage_service import load_cv2_image
 
 
 def load_clip_model() -> Tuple[Any, Any]:
@@ -48,7 +49,7 @@ def load_clip_model() -> Tuple[Any, Any]:
             # Load model and processor
             processor = CLIPProcessor.from_pretrained(model_name)
             model = CLIPModel.from_pretrained(model_name)
-            
+        
             # Move to appropriate device
             device = model_registry.get("device", "cpu")
             model.to(device)
@@ -206,20 +207,13 @@ async def extract_patches(
     """
     start_time = time.time()
     
-    # Validate inputs
-    if not os.path.exists(image_path):
-        raise FileNotFoundError(f"Image not found: {image_path}")
-    
     if not annotations:
         raise ValueError("Annotations list cannot be empty")
     
-    logger.info(f"Extracting patches from {image_path}")
+    image, display_image_path = await load_cv2_image(image_path)
+
+    logger.info("Extracting patches from %s", display_image_path)
     logger.info(f"Annotations: {len(annotations)}, Padding factor: {padding_factor}")
-    
-    # Load image
-    image = cv2.imread(image_path)
-    if image is None:
-        raise ValueError(f"Failed to load image: {image_path}")
     
     img_height, img_width = image.shape[:2]
     
@@ -343,36 +337,49 @@ async def cluster_patches(
     
     # Extract CLIP embeddings for each patch
     logger.info("Extracting CLIP embeddings...")
-    embeddings = []
-    
-    for patch in patches:
+    embeddings: List[np.ndarray | None] = [None] * len(patches)
+    decoded_images: List[Image.Image] = []
+    decoded_indices: List[int] = []
+
+    for idx, patch in enumerate(patches):
         try:
             # Decode base64 to image
             patch_image = base64_to_image(patch["image_base64"])
-            
-            # Convert to PIL Image
-            pil_image = Image.fromarray(patch_image)
-            
-            # Process with CLIP
-            inputs = processor(images=pil_image, return_tensors="pt")
+            decoded_images.append(Image.fromarray(patch_image))
+            decoded_indices.append(idx)
+        except Exception as e:
+            logger.error(f"Failed to decode patch {patch['patch_id']}: {e}")
+            # Use zero embedding as fallback
+            embeddings[idx] = np.zeros(512)
+
+    batch_size = 16
+    for batch_start in range(0, len(decoded_images), batch_size):
+        batch_images = decoded_images[batch_start:batch_start + batch_size]
+        batch_indices = decoded_indices[batch_start:batch_start + batch_size]
+
+        try:
+            inputs = processor(images=batch_images, return_tensors="pt", padding=True)
             inputs = {k: v.to(device) for k, v in inputs.items()}
-            
-            # Extract image features
+
             with torch.no_grad():
                 image_features = model.get_image_features(**inputs)
-            
-            # Convert to numpy and normalize
-            embedding = image_features.cpu().numpy().flatten()
-            embedding = embedding / (np.linalg.norm(embedding) + 1e-6)
-            
-            embeddings.append(embedding)
-            
+
+            batch_embeddings = image_features.cpu().numpy()
+            for embedding_idx, patch_idx in enumerate(batch_indices):
+                embedding = batch_embeddings[embedding_idx].flatten()
+                embedding = embedding / (np.linalg.norm(embedding) + 1e-6)
+                embeddings[patch_idx] = embedding
         except Exception as e:
-            logger.error(f"Failed to process patch {patch['patch_id']}: {e}")
-            # Use zero embedding as fallback
-            embeddings.append(np.zeros(512))
-    
-    embeddings_array = np.array(embeddings)
+            logger.error("Failed to process CLIP batch starting at patch %s: %s", batch_start, e)
+            for patch_idx in batch_indices:
+                patch_id = patches[patch_idx]["patch_id"]
+                logger.error("Using zero embedding fallback for patch %s", patch_id)
+                embeddings[patch_idx] = np.zeros(512)
+
+    embeddings_array = np.array([
+        embedding if embedding is not None else np.zeros(512)
+        for embedding in embeddings
+    ])
     logger.info(f"Extracted embeddings shape: {embeddings_array.shape}")
     
     # Run K-Means clustering
@@ -389,16 +396,19 @@ async def cluster_patches(
         cluster_patches = [patches[i] for i in cluster_indices]
         
         # Calculate average bounding box size for this cluster
-        avg_bbox_size = np.mean([
-            patch["original_bbox"][2] * patch["original_bbox"][3]
-            for patch in cluster_patches
-        ])
+        if cluster_patches:
+            avg_bbox_size = float(np.mean([
+                patch["original_bbox"][2] * patch["original_bbox"][3]
+                for patch in cluster_patches
+            ]))
+        else:
+            avg_bbox_size = 0.0
         
         cluster_sizes[cluster_id] = avg_bbox_size
         
         cluster_stats[f"cluster_{cluster_id}"] = {
             "num_patches": len(cluster_patches),
-            "avg_bbox_area": float(avg_bbox_size),
+            "avg_bbox_area": avg_bbox_size,
             "centroid": kmeans.cluster_centers_[cluster_id].tolist()
         }
     

@@ -7,7 +7,8 @@ and clustering them by severity using CLIP embeddings.
 
 import time
 import logging
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
 from models.schemas import (
     PatchExtractRequest,
     PatchExtractResponse,
@@ -17,10 +18,21 @@ from models.schemas import (
 )
 
 from services import patch_service
+from core.deps import get_current_active_user
+from core.asset_resolver import resolve_image_reference
+from models.db_models import User
+from models.database import get_db
+from core.path_security import safe_display_path
+from core.serialization import patches_from_dicts, patches_to_dicts
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _build_patch_metadata_list(payloads: list[dict]) -> list[PatchMetadata]:
+    """Convert patch payload dictionaries into response models."""
+    return patches_from_dicts(payloads)
 
 
 @router.post(
@@ -65,7 +77,11 @@ router = APIRouter()
     - `total_patches`: Number of patches extracted
     """
 )
-async def extract_patches(request: PatchExtractRequest) -> PatchExtractResponse:
+async def extract_patches(
+    request: PatchExtractRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> PatchExtractResponse:
     """
     Extract patches from annotated regions with optimal sizing.
     
@@ -83,39 +99,30 @@ async def extract_patches(request: PatchExtractRequest) -> PatchExtractResponse:
     start_time = time.time()
     
     try:
-        logger.info(f"Extracting patches from {request.image_path}")
+        resolved_image_path = await resolve_image_reference(
+            db=db,
+            owner_id=current_user.id,
+            image_path=request.image_path,
+            image_asset_id=request.image_asset_id,
+            source_uri=request.source_uri,
+        )
+
+        logger.info(
+            "User %s extracting patches from %s",
+            current_user.id,
+            safe_display_path(resolved_image_path),
+        )
         logger.info(f"Annotations: {len(request.annotations)}, Patch size: {request.patch_size}")
-        
-        # Convert Pydantic models to dicts
-        annotations_dict = [
-            {
-                "bbox": ann.bbox,
-                "class_name": ann.class_name,
-                "confidence": ann.confidence,
-                "annotation_id": ann.annotation_id
-            }
-            for ann in request.annotations
-        ]
         
         # Call service
         result = await patch_service.extract_patches(
-            image_path=request.image_path,
-            annotations=annotations_dict,
+            image_path=resolved_image_path,
+            annotations=[annotation.model_dump(exclude_none=True) for annotation in request.annotations],
             patch_size=request.patch_size,
             padding_factor=request.padding_factor
         )
         
-        # Convert to Pydantic models
-        patches = [
-            PatchMetadata(
-                patch_id=patch["patch_id"],
-                image_base64=patch["image_base64"],
-                original_bbox=patch["original_bbox"],
-                class_name=patch["class_name"],
-                patch_size=patch["patch_size"]
-            )
-            for patch in result["patches"]
-        ]
+        patches = _build_patch_metadata_list(result["patches"])
         
         processing_time = time.time() - start_time
         
@@ -194,7 +201,10 @@ async def extract_patches(request: PatchExtractRequest) -> PatchExtractResponse:
     - `cluster_stats`: Statistics for each cluster
     """
 )
-async def cluster_patches(request: ClusterPatchesRequest) -> ClusterPatchesResponse:
+async def cluster_patches(
+    request: ClusterPatchesRequest,
+    current_user: User = Depends(get_current_active_user),
+) -> ClusterPatchesResponse:
     """
     Cluster patches by severity using CLIP and K-Means.
     
@@ -211,59 +221,22 @@ async def cluster_patches(request: ClusterPatchesRequest) -> ClusterPatchesRespo
     start_time = time.time()
     
     try:
-        logger.info(f"Clustering {len(request.patches)} patches into {request.num_clusters} groups")
-        
-        # Convert Pydantic models to dicts
-        patches_dict = [
-            {
-                "patch_id": patch.patch_id,
-                "image_base64": patch.image_base64,
-                "original_bbox": patch.original_bbox,
-                "class_name": patch.class_name,
-                "patch_size": patch.patch_size
-            }
-            for patch in request.patches
-        ]
+        logger.info(
+            "User %s clustering %s patches into %s groups",
+            current_user.id,
+            len(request.patches),
+            request.num_clusters,
+        )
         
         # Call service
         result = await patch_service.cluster_patches(
-            patches=patches_dict,
+            patches=patches_to_dicts(request.patches),
             num_clusters=request.num_clusters
         )
         
-        # Convert to Pydantic models
-        severe = [
-            PatchMetadata(
-                patch_id=patch["patch_id"],
-                image_base64=patch["image_base64"],
-                original_bbox=patch["original_bbox"],
-                class_name=patch["class_name"],
-                patch_size=patch["patch_size"]
-            )
-            for patch in result["severe"]
-        ]
-        
-        minor = [
-            PatchMetadata(
-                patch_id=patch["patch_id"],
-                image_base64=patch["image_base64"],
-                original_bbox=patch["original_bbox"],
-                class_name=patch["class_name"],
-                patch_size=patch["patch_size"]
-            )
-            for patch in result["minor"]
-        ]
-        
-        clean = [
-            PatchMetadata(
-                patch_id=patch["patch_id"],
-                image_base64=patch["image_base64"],
-                original_bbox=patch["original_bbox"],
-                class_name=patch["class_name"],
-                patch_size=patch["patch_size"]
-            )
-            for patch in result["clean"]
-        ]
+        severe = _build_patch_metadata_list(result["severe"])
+        minor = _build_patch_metadata_list(result["minor"])
+        clean = _build_patch_metadata_list(result["clean"])
         
         processing_time = time.time() - start_time
         

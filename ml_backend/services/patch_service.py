@@ -9,7 +9,7 @@ import os
 import time
 import base64
 import logging
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from io import BytesIO
 import numpy as np
 from PIL import Image
@@ -171,7 +171,7 @@ def base64_to_image(base64_str: str) -> np.ndarray:
 async def extract_patches(
     image_path: str,
     annotations: List[Dict[str, Any]],
-    patch_size: int = None,
+    patch_size: Optional[int] = None,
     padding_factor: float = 1.5
 ) -> Dict[str, Any]:
     """

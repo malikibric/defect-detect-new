@@ -143,8 +143,8 @@ async def generate_synthetic_variations(
         # Determine output directory from first generated path
         output_dir = "output/synthetic"
         if generated_paths:
-            from pathlib import Path
-            output_dir = str(Path(generated_paths[0]).parent)
+            from pathlib import Path as _Path
+            output_dir = str(_Path(generated_paths[0]).parent)
         
         logger.info(f"Generation successful: {len(generated_paths)} images in {processing_time:.2f}s")
         logger.info(f"Average time per image: {processing_time/max(len(generated_paths), 1):.2f}s")

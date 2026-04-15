@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from jose import JWTError, jwt
@@ -11,6 +12,7 @@ from redis import asyncio as redis_async
 from core.config import settings
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.websocket("/jobs/{job_id}")
@@ -46,8 +48,8 @@ async def job_updates(websocket: WebSocket, job_id: int) -> None:
                 await websocket.send_text(json.dumps({"job_id": job_id, "status": "heartbeat"}))
     except WebSocketDisconnect:
         pass
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("WebSocket error for job %s: %s", job_id, exc)
     finally:
         await pubsub.unsubscribe(channel)
         await pubsub.close()

@@ -1,8 +1,13 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from models.database import Base
+
+
+def _utcnow() -> datetime:
+    """Return current UTC time as a naive datetime (strips tzinfo for DB compatibility)."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class User(Base):
@@ -13,7 +18,7 @@ class User(Base):
     hashed_password = Column(String, nullable=False)
     is_active = Column(Boolean, default=True)
     is_superuser = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
 
     projects = relationship("Project", back_populates="owner", cascade="all, delete-orphan")
     image_assets = relationship("ImageAsset", back_populates="owner", cascade="all, delete-orphan")
@@ -27,7 +32,7 @@ class Project(Base):
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
     owner_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
 
     owner = relationship("User", back_populates="projects")
     image_assets = relationship("ImageAsset", back_populates="project", cascade="all, delete-orphan")
@@ -44,7 +49,7 @@ class ImageAsset(Base):
     content_type = Column(String(255), nullable=True)
     checksum = Column(String(128), nullable=True)
     original_filename = Column(String(512), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
 
     owner = relationship("User", back_populates="image_assets")
     project = relationship("Project", back_populates="image_assets")
@@ -65,8 +70,8 @@ class Job(Base):
     project_id = Column(Integer, ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True)
     image_asset_id = Column(Integer, ForeignKey("image_assets.id", ondelete="SET NULL"), nullable=True, index=True)
     created_by_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
     project = relationship("Project", back_populates="jobs")
     image_asset = relationship("ImageAsset", back_populates="jobs")
@@ -82,6 +87,6 @@ class Artifact(Base):
     artifact_type = Column(String(100), nullable=False)
     uri = Column(String(1024), nullable=False)
     metadata_json = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
 
     job = relationship("Job", back_populates="artifacts")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy import select
@@ -18,6 +19,8 @@ from services.storage_service import get_storage_service
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"}
+
 
 @router.post("/upload", response_model=FileUploadResponse, status_code=status.HTTP_201_CREATED)
 async def upload_file(
@@ -30,10 +33,18 @@ async def upload_file(
     if not file.filename:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing filename")
 
+    ext = Path(file.filename).suffix.lower()
+    if ext not in _ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=f"Unsupported file type '{ext}'. Allowed: {', '.join(sorted(_ALLOWED_EXTENSIONS))}",
+        )
+
     max_size_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
     storage = get_storage_service()
-    metadata = await storage.save_upload(file)
-    if int(metadata["size_bytes"]) > max_size_bytes:
+    try:
+        metadata = await storage.save_upload(file, max_size_bytes=max_size_bytes)
+    except ValueError:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail=f"File exceeds max size of {settings.MAX_UPLOAD_SIZE_MB}MB",

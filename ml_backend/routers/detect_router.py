@@ -28,11 +28,15 @@ async def _save_temp_file(upload: UploadFile) -> str:
     suffix = os.path.splitext(upload.filename or "upload.jpg")[1] or ".jpg"
     fd, path = tempfile.mkstemp(suffix=suffix)
     try:
-        contents = await upload.read()
-        os.write(fd, contents)
-    finally:
-        os.close(fd)
-    return path
+        try:
+            contents = await upload.read()
+            os.write(fd, contents)
+        finally:
+            os.close(fd)
+        return path
+    except Exception:
+        _cleanup(path)
+        raise
 
 
 def _cleanup(path: str | None) -> None:

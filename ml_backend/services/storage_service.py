@@ -24,7 +24,7 @@ from core.path_security import resolve_existing_input_path, safe_display_path
 
 
 class StorageService(Protocol):
-    async def save_upload(self, file: UploadFile) -> dict[str, str]:
+    async def save_upload(self, file: UploadFile, max_size_bytes: int | None = None) -> dict[str, str]:
         ...
 
 
@@ -35,7 +35,7 @@ class LocalStorageService:
         self.root = Path(root or settings.LOCAL_STORAGE_ROOT).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
 
-    async def save_upload(self, file: UploadFile) -> dict[str, str]:
+    async def save_upload(self, file: UploadFile, max_size_bytes: int | None = None) -> dict[str, str]:
         suffix = Path(file.filename or "upload.bin").suffix
         filename = f"{uuid.uuid4().hex}{suffix}"
         destination = self.root / filename
@@ -43,14 +43,20 @@ class LocalStorageService:
         sha256 = hashlib.sha256()
         size_bytes = 0
 
-        with destination.open("wb") as output:
-            while True:
-                chunk = await file.read(1024 * 1024)
-                if not chunk:
-                    break
-                size_bytes += len(chunk)
-                sha256.update(chunk)
-                output.write(chunk)
+        try:
+            with destination.open("wb") as output:
+                while True:
+                    chunk = await file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size_bytes += len(chunk)
+                    if max_size_bytes is not None and size_bytes > max_size_bytes:
+                        raise ValueError(f"Upload exceeds maximum allowed size of {max_size_bytes} bytes")
+                    sha256.update(chunk)
+                    output.write(chunk)
+        except ValueError:
+            destination.unlink(missing_ok=True)
+            raise
 
         await file.close()
 

@@ -48,9 +48,9 @@ class SAMPropagateRequest(BaseModel):
     image_asset_id: Optional[int] = Field(None, description="Registered image asset ID")
     source_uri: Optional[str] = Field(None, description="Storage URI for the input image")
     seed_annotations: List[Annotation] = Field(
-        ..., 
-        min_items=2, 
-        max_items=10,
+        ...,
+        min_length=2,
+        max_length=10,
         description="Seed annotations for propagation (2-10 examples)"
     )
     similarity_threshold: float = Field(

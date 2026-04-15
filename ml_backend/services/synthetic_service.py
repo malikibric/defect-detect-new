@@ -376,8 +376,6 @@ async def generate_synthetic_defects_fallback(
     
     # Load image
     image, display_image_path = await load_cv2_image(image_path)
-    if image is None:
-        raise ValueError(f"Failed to load image: {display_image_path}")
     
     generated_paths = []
     base_filename = image_reference_stem(image_path)

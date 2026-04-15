@@ -109,7 +109,10 @@ async def test_propagate_annotations_invalid_image():
     with pytest.raises(FileNotFoundError):
         await sam_service.propagate_annotations(
             image_path="nonexistent_image.jpg",
-            seed_annotations=[{"bbox": [0, 0, 10, 10], "class_name": "defect"}],
+            seed_annotations=[
+                {"bbox": [0, 0, 10, 10], "class_name": "defect"},
+                {"bbox": [10, 10, 20, 20], "class_name": "defect"},
+            ],
             similarity_threshold=0.75
         )
 

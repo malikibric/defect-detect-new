@@ -283,7 +283,7 @@ async def test_generate_synthetic_defects_output_directory_creation(
     
     # Create unique output directory that doesn't exist yet
     base_temp = tempfile.gettempdir()
-    output_dir = os.path.join(base_temp, f"test_synthetic_{os.getpid()}")
+    output_dir = os.path.realpath(os.path.join(base_temp, f"test_synthetic_{os.getpid()}"))
     
     # Ensure it doesn't exist
     if os.path.exists(output_dir):
